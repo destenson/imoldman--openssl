@@ -62,28 +62,35 @@
 #include <openssl/objects.h>
 #include <openssl/x509.h>
 
-int EVP_add_cipher(EVP_CIPHER *c)
+int EVP_add_cipher(const EVP_CIPHER *c)
 	{
 	int r;
 
-	r=OBJ_NAME_add(OBJ_nid2sn(c->nid),OBJ_NAME_TYPE_CIPHER_METH,(char *)c);
+#ifdef OPENSSL_FIPS
+	OPENSSL_init();
+#endif
+
+	r=OBJ_NAME_add(OBJ_nid2sn(c->nid),OBJ_NAME_TYPE_CIPHER_METH,(const char *)c);
 	if (r == 0) return(0);
-	r=OBJ_NAME_add(OBJ_nid2ln(c->nid),OBJ_NAME_TYPE_CIPHER_METH,(char *)c);
+	r=OBJ_NAME_add(OBJ_nid2ln(c->nid),OBJ_NAME_TYPE_CIPHER_METH,(const char *)c);
 	return(r);
 	}
 
-int EVP_add_digest(EVP_MD *md)
+int EVP_add_digest(const EVP_MD *md)
 	{
 	int r;
 	const char *name;
 
+#ifdef OPENSSL_FIPS
+	OPENSSL_init();
+#endif
 	name=OBJ_nid2sn(md->type);
-	r=OBJ_NAME_add(name,OBJ_NAME_TYPE_MD_METH,(char *)md);
+	r=OBJ_NAME_add(name,OBJ_NAME_TYPE_MD_METH,(const char *)md);
 	if (r == 0) return(0);
-	r=OBJ_NAME_add(OBJ_nid2ln(md->type),OBJ_NAME_TYPE_MD_METH,(char *)md);
+	r=OBJ_NAME_add(OBJ_nid2ln(md->type),OBJ_NAME_TYPE_MD_METH,(const char *)md);
 	if (r == 0) return(0);
 
-	if (md->type != md->pkey_type)
+	if (md->pkey_type && md->type != md->pkey_type)
 		{
 		r=OBJ_NAME_add(OBJ_nid2sn(md->pkey_type),
 			OBJ_NAME_TYPE_MD_METH|OBJ_NAME_ALIAS,name);

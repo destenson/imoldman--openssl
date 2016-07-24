@@ -66,17 +66,21 @@
 /* Size of an SSL signature: MD5+SHA1 */
 #define SSL_SIG_LENGTH	36
 
-int RSA_sign(int type, unsigned char *m, unsigned int m_len,
+int RSA_sign(int type, const unsigned char *m, unsigned int m_len,
 	     unsigned char *sigret, unsigned int *siglen, RSA *rsa)
 	{
 	X509_SIG sig;
 	ASN1_TYPE parameter;
 	int i,j,ret=1;
-	unsigned char *p,*s = NULL;
+	unsigned char *p, *tmps = NULL;
+	const unsigned char *s = NULL;
 	X509_ALGOR algor;
 	ASN1_OCTET_STRING digest;
-	if(rsa->flags & RSA_FLAG_SIGN_VER)
-	      return rsa->meth->rsa_sign(type, m, m_len, sigret, siglen, rsa);
+	if((rsa->flags & RSA_FLAG_SIGN_VER) && rsa->meth->rsa_sign)
+		{
+		return rsa->meth->rsa_sign(type, m, m_len,
+			sigret, siglen, rsa);
+		}
 	/* Special case: SSL signature, just check the length */
 	if(type == NID_md5_sha1) {
 		if(m_len != SSL_SIG_LENGTH) {
@@ -86,6 +90,14 @@ int RSA_sign(int type, unsigned char *m, unsigned int m_len,
 		i = SSL_SIG_LENGTH;
 		s = m;
 	} else {
+	/* NB: in FIPS mode block anything that isn't a TLS signature */
+#ifdef OPENSSL_FIPS
+		if(FIPS_mode() && !(rsa->flags & RSA_FLAG_NON_FIPS_ALLOW))
+			{
+			RSAerr(RSA_F_RSA_SIGN, RSA_R_OPERATION_NOT_ALLOWED_IN_FIPS_MODE);
+			return 0;
+			}
+#endif
 		sig.algor= &algor;
 		sig.algor->algorithm=OBJ_nid2obj(type);
 		if (sig.algor->algorithm == NULL)
@@ -103,45 +115,51 @@ int RSA_sign(int type, unsigned char *m, unsigned int m_len,
 		sig.algor->parameter= &parameter;
 
 		sig.digest= &digest;
-		sig.digest->data=m;
+		sig.digest->data=(unsigned char *)m; /* TMP UGLY CAST */
 		sig.digest->length=m_len;
 
 		i=i2d_X509_SIG(&sig,NULL);
 	}
 	j=RSA_size(rsa);
-	if ((i-RSA_PKCS1_PADDING) > j)
+	if (i > (j-RSA_PKCS1_PADDING_SIZE))
 		{
 		RSAerr(RSA_F_RSA_SIGN,RSA_R_DIGEST_TOO_BIG_FOR_RSA_KEY);
 		return(0);
 		}
 	if(type != NID_md5_sha1) {
-		s=(unsigned char *)OPENSSL_malloc((unsigned int)j+1);
-		if (s == NULL)
+		tmps=(unsigned char *)OPENSSL_malloc((unsigned int)j+1);
+		if (tmps == NULL)
 			{
 			RSAerr(RSA_F_RSA_SIGN,ERR_R_MALLOC_FAILURE);
 			return(0);
 			}
-		p=s;
+		p=tmps;
 		i2d_X509_SIG(&sig,&p);
+		s=tmps;
 	}
+#ifdef OPENSSL_FIPS
+	/* Bypass algorithm blocking: this is allowed if we get this far */
+	i=rsa->meth->rsa_priv_enc(i,s,sigret,rsa,RSA_PKCS1_PADDING);
+#else
 	i=RSA_private_encrypt(i,s,sigret,rsa,RSA_PKCS1_PADDING);
+#endif
 	if (i <= 0)
 		ret=0;
 	else
 		*siglen=i;
 
 	if(type != NID_md5_sha1) {
-		memset(s,0,(unsigned int)j+1);
-		OPENSSL_free(s);
+		OPENSSL_cleanse(tmps,(unsigned int)j+1);
+		OPENSSL_free(tmps);
 	}
 	return(ret);
 	}
 
-int RSA_verify(int dtype, unsigned char *m, unsigned int m_len,
+int RSA_verify(int dtype, const unsigned char *m, unsigned int m_len,
 	     unsigned char *sigbuf, unsigned int siglen, RSA *rsa)
 	{
 	int i,ret=0,sigtype;
-	unsigned char *p,*s;
+	unsigned char *s;
 	X509_SIG *sig=NULL;
 
 	if (siglen != (unsigned int)RSA_size(rsa))
@@ -150,8 +168,11 @@ int RSA_verify(int dtype, unsigned char *m, unsigned int m_len,
 		return(0);
 		}
 
-	if(rsa->flags & RSA_FLAG_SIGN_VER)
-	    return rsa->meth->rsa_verify(dtype, m, m_len, sigbuf, siglen, rsa);
+	if((rsa->flags & RSA_FLAG_SIGN_VER) && rsa->meth->rsa_verify)
+		{
+		return rsa->meth->rsa_verify(dtype, m, m_len,
+			sigbuf, siglen, rsa);
+		}
 
 	s=(unsigned char *)OPENSSL_malloc((unsigned int)siglen);
 	if (s == NULL)
@@ -159,11 +180,26 @@ int RSA_verify(int dtype, unsigned char *m, unsigned int m_len,
 		RSAerr(RSA_F_RSA_VERIFY,ERR_R_MALLOC_FAILURE);
 		goto err;
 		}
-	if((dtype == NID_md5_sha1) && (m_len != SSL_SIG_LENGTH) ) {
+	if(dtype == NID_md5_sha1)
+		{
+		if (m_len != SSL_SIG_LENGTH)
+			{
 			RSAerr(RSA_F_RSA_VERIFY,RSA_R_INVALID_MESSAGE_LENGTH);
-			return(0);
-	}
+			goto err;
+			}
+		}
+	/* NB: in FIPS mode block anything that isn't a TLS signature */
+#ifdef OPENSSL_FIPS
+	else if(FIPS_mode() && !(rsa->flags & RSA_FLAG_NON_FIPS_ALLOW))
+		{
+		RSAerr(RSA_F_RSA_VERIFY, RSA_R_OPERATION_NOT_ALLOWED_IN_FIPS_MODE);
+		return 0;
+		}
+	/* Bypass algorithm blocking: this is allowed */
+	i=rsa->meth->rsa_pub_dec((int)siglen,sigbuf,s,rsa,RSA_PKCS1_PADDING);
+#else
 	i=RSA_public_decrypt((int)siglen,sigbuf,s,rsa,RSA_PKCS1_PADDING);
+#endif
 
 	if (i <= 0) goto err;
 
@@ -173,10 +209,27 @@ int RSA_verify(int dtype, unsigned char *m, unsigned int m_len,
 				RSAerr(RSA_F_RSA_VERIFY,RSA_R_BAD_SIGNATURE);
 		else ret = 1;
 	} else {
-		p=s;
+		const unsigned char *p=s;
 		sig=d2i_X509_SIG(NULL,&p,(long)i);
 
 		if (sig == NULL) goto err;
+
+		/* Excess data can be used to create forgeries */
+		if(p != s+i)
+			{
+			RSAerr(RSA_F_RSA_VERIFY,RSA_R_BAD_SIGNATURE);
+			goto err;
+			}
+
+		/* Parameters to the signature algorithm can also be used to
+		   create forgeries */
+		if(sig->algor->parameter
+		   && ASN1_TYPE_get(sig->algor->parameter) != V_ASN1_NULL)
+			{
+			RSAerr(RSA_F_RSA_VERIFY,RSA_R_BAD_SIGNATURE);
+			goto err;
+			}
+
 		sigtype=OBJ_obj2nid(sig->algor->algorithm);
 
 
@@ -193,9 +246,9 @@ int RSA_verify(int dtype, unsigned char *m, unsigned int m_len,
 				(sigtype == NID_md2WithRSAEncryption)))
 				{
 				/* ok, we will let it through */
-	#if !defined(NO_STDIO) && !defined(WIN16)
+#if !defined(OPENSSL_NO_STDIO) && !defined(OPENSSL_SYS_WIN16)
 				fprintf(stderr,"signature has problems, re-make with post SSLeay045\n");
-	#endif
+#endif
 				}
 			else
 				{
@@ -214,8 +267,11 @@ int RSA_verify(int dtype, unsigned char *m, unsigned int m_len,
 	}
 err:
 	if (sig != NULL) X509_SIG_free(sig);
-	memset(s,0,(unsigned int)siglen);
-	OPENSSL_free(s);
+	if (s != NULL)
+		{
+		OPENSSL_cleanse(s,(unsigned int)siglen);
+		OPENSSL_free(s);
+		}
 	return(ret);
 	}
 

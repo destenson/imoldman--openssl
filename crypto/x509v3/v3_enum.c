@@ -1,5 +1,5 @@
 /* v3_enum.c */
-/* Written by Dr Stephen N Henson (shenson@bigfoot.com) for the OpenSSL
+/* Written by Dr Stephen N Henson (steve@openssl.org) for the OpenSSL
  * project 1999.
  */
 /* ====================================================================
@@ -72,15 +72,13 @@ static ENUMERATED_NAMES crl_reasons[] = {
 {-1, NULL, NULL}
 };
 
-X509V3_EXT_METHOD v3_crl_reason = { 
-NID_crl_reason, 0,
-(X509V3_EXT_NEW)ASN1_ENUMERATED_new,
-(X509V3_EXT_FREE)ASN1_ENUMERATED_free,
-(X509V3_EXT_D2I)d2i_ASN1_ENUMERATED,
-(X509V3_EXT_I2D)i2d_ASN1_ENUMERATED,
+const X509V3_EXT_METHOD v3_crl_reason = { 
+NID_crl_reason, 0, ASN1_ITEM_ref(ASN1_ENUMERATED),
+0,0,0,0,
 (X509V3_EXT_I2S)i2s_ASN1_ENUMERATED_TABLE,
-(X509V3_EXT_S2I)0,
-NULL, NULL, NULL, NULL, crl_reasons};
+0,
+0,0,0,0,
+crl_reasons};
 
 
 char *i2s_ASN1_ENUMERATED_TABLE(X509V3_EXT_METHOD *method,

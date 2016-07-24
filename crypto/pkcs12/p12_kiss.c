@@ -1,5 +1,5 @@
 /* p12_kiss.c */
-/* Written by Dr Stephen N Henson (shenson@bigfoot.com) for the OpenSSL
+/* Written by Dr Stephen N Henson (steve@openssl.org) for the OpenSSL
  * project 1999.
  */
 /* ====================================================================
@@ -80,7 +80,7 @@ static int parse_bag( PKCS12_SAFEBAG *bag, const char *pass, int passlen,
  * passed unitialised.
  */
 
-int PKCS12_parse (PKCS12 *p12, const char *pass, EVP_PKEY **pkey, X509 **cert,
+int PKCS12_parse(PKCS12 *p12, const char *pass, EVP_PKEY **pkey, X509 **cert,
 	     STACK_OF(X509) **ca)
 {
 
@@ -141,7 +141,7 @@ int PKCS12_parse (PKCS12 *p12, const char *pass, EVP_PKEY **pkey, X509 **cert,
 
 /* Parse the outer PKCS#12 structure */
 
-static int parse_pk12 (PKCS12 *p12, const char *pass, int passlen,
+static int parse_pk12(PKCS12 *p12, const char *pass, int passlen,
 	     EVP_PKEY **pkey, X509 **cert, STACK_OF(X509) **ca)
 {
 	STACK_OF(PKCS7) *asafes;
@@ -151,14 +151,14 @@ static int parse_pk12 (PKCS12 *p12, const char *pass, int passlen,
 	ASN1_OCTET_STRING *keyid = NULL;
 
 	char keymatch = 0;
-	if (!( asafes = M_PKCS12_unpack_authsafes (p12))) return 0;
+	if (!(asafes = PKCS12_unpack_authsafes (p12))) return 0;
 	for (i = 0; i < sk_PKCS7_num (asafes); i++) {
 		p7 = sk_PKCS7_value (asafes, i);
 		bagnid = OBJ_obj2nid (p7->type);
 		if (bagnid == NID_pkcs7_data) {
-			bags = M_PKCS12_unpack_p7data(p7);
+			bags = PKCS12_unpack_p7data(p7);
 		} else if (bagnid == NID_pkcs7_encrypted) {
-			bags = M_PKCS12_unpack_p7encdata(p7, pass, passlen);
+			bags = PKCS12_unpack_p7encdata(p7, pass, passlen);
 		} else continue;
 		if (!bags) {
 			sk_PKCS7_pop_free(asafes, PKCS7_free);
@@ -178,10 +178,10 @@ static int parse_pk12 (PKCS12 *p12, const char *pass, int passlen,
 }
 
 
-static int parse_bags (STACK_OF(PKCS12_SAFEBAG) *bags, const char *pass,
-		       int passlen, EVP_PKEY **pkey, X509 **cert,
-		       STACK_OF(X509) **ca, ASN1_OCTET_STRING **keyid,
-		       char *keymatch)
+static int parse_bags(STACK_OF(PKCS12_SAFEBAG) *bags, const char *pass,
+		      int passlen, EVP_PKEY **pkey, X509 **cert,
+		      STACK_OF(X509) **ca, ASN1_OCTET_STRING **keyid,
+		      char *keymatch)
 {
 	int i;
 	for (i = 0; i < sk_PKCS12_SAFEBAG_num(bags); i++) {
@@ -197,9 +197,9 @@ static int parse_bags (STACK_OF(PKCS12_SAFEBAG) *bags, const char *pass,
 #define MATCH_ALL  0x3
 
 static int parse_bag(PKCS12_SAFEBAG *bag, const char *pass, int passlen,
-		      EVP_PKEY **pkey, X509 **cert, STACK_OF(X509) **ca,
-		      ASN1_OCTET_STRING **keyid,
-	     char *keymatch)
+		     EVP_PKEY **pkey, X509 **cert, STACK_OF(X509) **ca,
+		     ASN1_OCTET_STRING **keyid,
+		     char *keymatch)
 {
 	PKCS8_PRIV_KEY_INFO *p8;
 	X509 *x509;
@@ -221,7 +221,7 @@ static int parse_bag(PKCS12_SAFEBAG *bag, const char *pass, int passlen,
 			if (M_ASN1_OCTET_STRING_cmp(*keyid, lkey)) lkey = NULL;
 		} else {
 			if (!(*keyid = M_ASN1_OCTET_STRING_dup(lkey))) {
-				PKCS12err(PKCS12_F_PARSE_BAGS,ERR_R_MALLOC_FAILURE);
+				PKCS12err(PKCS12_F_PARSE_BAG,ERR_R_MALLOC_FAILURE);
 				return 0;
 		    }
 		}
@@ -237,7 +237,7 @@ static int parse_bag(PKCS12_SAFEBAG *bag, const char *pass, int passlen,
 
 	case NID_pkcs8ShroudedKeyBag:
 		if (!lkey || !pkey) return 1;	
-		if (!(p8 = M_PKCS12_decrypt_skey(bag, pass, passlen)))
+		if (!(p8 = PKCS12_decrypt_skey(bag, pass, passlen)))
 				return 0;
 		*pkey = EVP_PKCS82PKEY(p8);
 		PKCS8_PRIV_KEY_INFO_free(p8);
@@ -248,15 +248,27 @@ static int parse_bag(PKCS12_SAFEBAG *bag, const char *pass, int passlen,
 	case NID_certBag:
 		if (M_PKCS12_cert_bag_type(bag) != NID_x509Certificate )
 								 return 1;
-		if (!(x509 = M_PKCS12_certbag2x509(bag))) return 0;
-		if(ckid) X509_keyid_set1(x509, ckid->data, ckid->length);
+		if (!(x509 = PKCS12_certbag2x509(bag))) return 0;
+		if(ckid)
+			{
+			if (!X509_keyid_set1(x509, ckid->data, ckid->length))
+				{
+				X509_free(x509);
+				return 0;
+				}
+			}
 		if(fname) {
-			int len;
+			int len, r;
 			unsigned char *data;
 			len = ASN1_STRING_to_UTF8(&data, fname);
 			if(len > 0) {
-				X509_alias_set1(x509, data, len);
+				r = X509_alias_set1(x509, data, len);
 				OPENSSL_free(data);
+				if (!r)
+					{
+					X509_free(x509);
+					return 0;
+					}
 			}
 		}
 
@@ -264,6 +276,7 @@ static int parse_bag(PKCS12_SAFEBAG *bag, const char *pass, int passlen,
 		if (lkey) {
 			*keymatch |= MATCH_CERT;
 			if (cert) *cert = x509;
+			else X509_free(x509);
 		} else {
 			if(ca) sk_X509_push (*ca, x509);
 			else X509_free(x509);

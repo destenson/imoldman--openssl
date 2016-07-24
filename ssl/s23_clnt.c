@@ -57,18 +57,18 @@
  */
 
 #include <stdio.h>
+#include "ssl_locl.h"
 #include <openssl/buffer.h>
 #include <openssl/rand.h>
 #include <openssl/objects.h>
 #include <openssl/evp.h>
-#include "ssl_locl.h"
 
 static SSL_METHOD *ssl23_get_client_method(int ver);
 static int ssl23_client_hello(SSL *s);
 static int ssl23_get_server_hello(SSL *s);
 static SSL_METHOD *ssl23_get_client_method(int ver)
 	{
-#ifndef NO_SSL2
+#ifndef OPENSSL_NO_SSL2
 	if (ver == SSL2_VERSION)
 		return(SSLv2_client_method());
 #endif
@@ -80,27 +80,16 @@ static SSL_METHOD *ssl23_get_client_method(int ver)
 		return(NULL);
 	}
 
-SSL_METHOD *SSLv23_client_method(void)
-	{
-	static int init=1;
-	static SSL_METHOD SSLv23_client_data;
-
-	if (init)
-		{
-		memcpy((char *)&SSLv23_client_data,
-			(char *)sslv23_base_method(),sizeof(SSL_METHOD));
-		SSLv23_client_data.ssl_connect=ssl23_connect;
-		SSLv23_client_data.get_ssl_method=ssl23_get_client_method;
-		init=0;
-		}
-	return(&SSLv23_client_data);
-	}
+IMPLEMENT_ssl23_meth_func(SSLv23_client_method,
+			ssl_undefined_function,
+			ssl23_connect,
+			ssl23_get_client_method)
 
 int ssl23_connect(SSL *s)
 	{
-	BUF_MEM *buf;
-	unsigned long Time=time(NULL);
-	void (*cb)()=NULL;
+	BUF_MEM *buf=NULL;
+	unsigned long Time=(unsigned long)time(NULL);
+	void (*cb)(const SSL *ssl,int type,int val)=NULL;
 	int ret= -1;
 	int new_state,state;
 
@@ -113,8 +102,8 @@ int ssl23_connect(SSL *s)
 	else if (s->ctx->info_callback != NULL)
 		cb=s->ctx->info_callback;
 	
-	if (!SSL_in_init(s) || SSL_in_before(s)) SSL_clear(s); 
 	s->in_handshake++;
+	if (!SSL_in_init(s) || SSL_in_before(s)) SSL_clear(s); 
 
 	for (;;)
 		{
@@ -152,6 +141,7 @@ int ssl23_connect(SSL *s)
 					goto end;
 					}
 				s->init_buf=buf;
+				buf=NULL;
 				}
 
 			if (!ssl3_setup_buffers(s)) { ret= -1; goto end; }
@@ -200,6 +190,8 @@ int ssl23_connect(SSL *s)
 		}
 end:
 	s->in_handshake--;
+	if (buf != NULL)
+		BUF_MEM_free(buf);
 	if (cb != NULL)
 		cb(s,SSL_CB_CONNECT_EXIT,ret);
 	return(ret);
@@ -211,6 +203,40 @@ static int ssl23_client_hello(SSL *s)
 	unsigned char *buf;
 	unsigned char *p,*d;
 	int i,ch_len;
+	unsigned long Time,l;
+	int ssl2_compat;
+	int version = 0, version_major, version_minor;
+#ifndef OPENSSL_NO_COMP
+	int j;
+	SSL_COMP *comp;
+#endif
+	int ret;
+
+	ssl2_compat = (s->options & SSL_OP_NO_SSLv2) ? 0 : 1;
+
+	if (!(s->options & SSL_OP_NO_TLSv1))
+		{
+		version = TLS1_VERSION;
+		}
+	else if (!(s->options & SSL_OP_NO_SSLv3))
+		{
+		version = SSL3_VERSION;
+		}
+	else if (!(s->options & SSL_OP_NO_SSLv2))
+		{
+		version = SSL2_VERSION;
+		}
+#ifndef OPENSSL_NO_TLSEXT 
+	if (version != SSL2_VERSION)
+		{
+		/* have to disable SSL 2.0 compatibility if we need TLS extensions */
+
+		if (s->tlsext_hostname != NULL)
+			ssl2_compat = 0;
+		if (s->tlsext_status_type != -1)
+			ssl2_compat = 0;
+		}
+#endif
 
 	buf=(unsigned char *)s->init_buf->data;
 	if (s->state == SSL23_ST_CW_CLNT_HELLO_A)
@@ -224,30 +250,33 @@ static int ssl23_client_hello(SSL *s)
 #endif
 
 		p=s->s3->client_random;
-		RAND_pseudo_bytes(p,SSL3_RANDOM_SIZE);
+		Time=(unsigned long)time(NULL);		/* Time */
+		l2n(Time,p);
+		if (RAND_pseudo_bytes(p,SSL3_RANDOM_SIZE-4) <= 0)
+			return -1;
 
-		/* Do the message type and length last */
-		d= &(buf[2]);
-		p=d+9;
-
-		*(d++)=SSL2_MT_CLIENT_HELLO;
-		if (!(s->options & SSL_OP_NO_TLSv1))
+		if (version == TLS1_VERSION)
 			{
-			*(d++)=TLS1_VERSION_MAJOR;
-			*(d++)=TLS1_VERSION_MINOR;
-			s->client_version=TLS1_VERSION;
+			version_major = TLS1_VERSION_MAJOR;
+			version_minor = TLS1_VERSION_MINOR;
 			}
-		else if (!(s->options & SSL_OP_NO_SSLv3))
+#ifdef OPENSSL_FIPS
+		else if(FIPS_mode())
 			{
-			*(d++)=SSL3_VERSION_MAJOR;
-			*(d++)=SSL3_VERSION_MINOR;
-			s->client_version=SSL3_VERSION;
+			SSLerr(SSL_F_SSL23_CLIENT_HELLO,
+					SSL_R_ONLY_TLS_ALLOWED_IN_FIPS_MODE);
+			return -1;
 			}
-		else if (!(s->options & SSL_OP_NO_SSLv2))
+#endif
+		else if (version == SSL3_VERSION)
 			{
-			*(d++)=SSL2_VERSION_MAJOR;
-			*(d++)=SSL2_VERSION_MINOR;
-			s->client_version=SSL2_VERSION;
+			version_major = SSL3_VERSION_MAJOR;
+			version_minor = SSL3_VERSION_MINOR;
+			}
+		else if (version == SSL2_VERSION)
+			{
+			version_major = SSL2_VERSION_MAJOR;
+			version_minor = SSL2_VERSION_MINOR;
 			}
 		else
 			{
@@ -255,54 +284,164 @@ static int ssl23_client_hello(SSL *s)
 			return(-1);
 			}
 
-		/* Ciphers supported */
-		i=ssl_cipher_list_to_bytes(s,SSL_get_ciphers(s),p);
-		if (i == 0)
+		s->client_version = version;
+
+		if (ssl2_compat)
 			{
-			/* no ciphers */
-			SSLerr(SSL_F_SSL23_CLIENT_HELLO,SSL_R_NO_CIPHERS_AVAILABLE);
-			return(-1);
-			}
-		s2n(i,d);
-		p+=i;
+			/* create SSL 2.0 compatible Client Hello */
 
-		/* put in the session-id, zero since there is no
-		 * reuse. */
+			/* two byte record header will be written last */
+			d = &(buf[2]);
+			p = d + 9; /* leave space for message type, version, individual length fields */
+
+			*(d++) = SSL2_MT_CLIENT_HELLO;
+			*(d++) = version_major;
+			*(d++) = version_minor;
+			
+			/* Ciphers supported */
+			i=ssl_cipher_list_to_bytes(s,SSL_get_ciphers(s),p,0);
+			if (i == 0)
+				{
+				/* no ciphers */
+				SSLerr(SSL_F_SSL23_CLIENT_HELLO,SSL_R_NO_CIPHERS_AVAILABLE);
+				return -1;
+				}
+			s2n(i,d);
+			p+=i;
+			
+			/* put in the session-id length (zero since there is no reuse) */
 #if 0
-		s->session->session_id_length=0;
+			s->session->session_id_length=0;
 #endif
-		s2n(0,d);
+			s2n(0,d);
 
-		if (s->options & SSL_OP_NETSCAPE_CHALLENGE_BUG)
-			ch_len=SSL2_CHALLENGE_LENGTH;
+			if (s->options & SSL_OP_NETSCAPE_CHALLENGE_BUG)
+				ch_len=SSL2_CHALLENGE_LENGTH;
+			else
+				ch_len=SSL2_MAX_CHALLENGE_LENGTH;
+
+			/* write out sslv2 challenge */
+			if (SSL3_RANDOM_SIZE < ch_len)
+				i=SSL3_RANDOM_SIZE;
+			else
+				i=ch_len;
+			s2n(i,d);
+			memset(&(s->s3->client_random[0]),0,SSL3_RANDOM_SIZE);
+			if (RAND_pseudo_bytes(&(s->s3->client_random[SSL3_RANDOM_SIZE-i]),i) <= 0)
+				return -1;
+
+			memcpy(p,&(s->s3->client_random[SSL3_RANDOM_SIZE-i]),i);
+			p+=i;
+
+			i= p- &(buf[2]);
+			buf[0]=((i>>8)&0xff)|0x80;
+			buf[1]=(i&0xff);
+
+			/* number of bytes to write */
+			s->init_num=i+2;
+			s->init_off=0;
+
+			ssl3_finish_mac(s,&(buf[2]),i);
+			}
 		else
-			ch_len=SSL2_MAX_CHALLENGE_LENGTH;
+			{
+			/* create Client Hello in SSL 3.0/TLS 1.0 format */
 
-		/* write out sslv2 challenge */
-		if (SSL3_RANDOM_SIZE < ch_len)
-			i=SSL3_RANDOM_SIZE;
-		else
-			i=ch_len;
-		s2n(i,d);
-		memset(&(s->s3->client_random[0]),0,SSL3_RANDOM_SIZE);
-		RAND_pseudo_bytes(&(s->s3->client_random[SSL3_RANDOM_SIZE-i]),i);
-		memcpy(p,&(s->s3->client_random[SSL3_RANDOM_SIZE-i]),i);
-		p+=i;
+			/* do the record header (5 bytes) and handshake message header (4 bytes) last */
+			d = p = &(buf[9]);
+			
+			*(p++) = version_major;
+			*(p++) = version_minor;
 
-		i= p- &(buf[2]);
-		buf[0]=((i>>8)&0xff)|0x80;
-		buf[1]=(i&0xff);
+			/* Random stuff */
+			memcpy(p, s->s3->client_random, SSL3_RANDOM_SIZE);
+			p += SSL3_RANDOM_SIZE;
+
+			/* Session ID (zero since there is no reuse) */
+			*(p++) = 0;
+
+			/* Ciphers supported (using SSL 3.0/TLS 1.0 format) */
+			i=ssl_cipher_list_to_bytes(s,SSL_get_ciphers(s),&(p[2]),ssl3_put_cipher_by_char);
+			if (i == 0)
+				{
+				SSLerr(SSL_F_SSL23_CLIENT_HELLO,SSL_R_NO_CIPHERS_AVAILABLE);
+				return -1;
+				}
+			s2n(i,p);
+			p+=i;
+#ifdef OPENSSL_NO_COMP
+			*(p++)=1;
+#else
+			/* COMPRESSION */
+			if (s->ctx->comp_methods == NULL)
+				j=0;
+			else
+				j=sk_SSL_COMP_num(s->ctx->comp_methods);
+			*(p++)=1+j;
+			for (i=0; i<j; i++)
+				{
+				comp=sk_SSL_COMP_value(s->ctx->comp_methods,i);
+				*(p++)=comp->id;
+				}
+#endif
+			*(p++)=0; /* Add the NULL method */
+#ifndef OPENSSL_NO_TLSEXT
+			if ((p = ssl_add_clienthello_tlsext(s, p, buf+SSL3_RT_MAX_PLAIN_LENGTH)) == NULL)
+				{
+				SSLerr(SSL_F_SSL23_CLIENT_HELLO,ERR_R_INTERNAL_ERROR);
+				return -1;
+				}
+#endif
+			
+			l = p-d;
+			*p = 42;
+
+			/* fill in 4-byte handshake header */
+			d=&(buf[5]);
+			*(d++)=SSL3_MT_CLIENT_HELLO;
+			l2n3(l,d);
+
+			l += 4;
+
+			if (l > SSL3_RT_MAX_PLAIN_LENGTH)
+				{
+				SSLerr(SSL_F_SSL23_CLIENT_HELLO,ERR_R_INTERNAL_ERROR);
+				return -1;
+				}
+			
+			/* fill in 5-byte record header */
+			d=buf;
+			*(d++) = SSL3_RT_HANDSHAKE;
+			*(d++) = version_major;
+			*(d++) = version_minor; /* arguably we should send the *lowest* suported version here
+			                         * (indicating, e.g., TLS 1.0 in "SSL 3.0 format") */
+			s2n((int)l,d);
+
+			/* number of bytes to write */
+			s->init_num=p-buf;
+			s->init_off=0;
+
+			ssl3_finish_mac(s,&(buf[5]), s->init_num - 5);
+			}
 
 		s->state=SSL23_ST_CW_CLNT_HELLO_B;
-		/* number of bytes to write */
-		s->init_num=i+2;
 		s->init_off=0;
-
-		ssl3_finish_mac(s,&(buf[2]),i);
 		}
 
 	/* SSL3_ST_CW_CLNT_HELLO_B */
-	return(ssl23_write_bytes(s));
+	ret = ssl23_write_bytes(s);
+
+	if ((ret >= 2) && s->msg_callback)
+		{
+		/* Client Hello has been sent; tell msg_callback */
+
+		if (ssl2_compat)
+			s->msg_callback(1, SSL2_VERSION, 0, s->init_buf->data+2, ret-2, s, s->msg_callback_arg);
+		else
+			s->msg_callback(1, version, SSL3_RT_HANDSHAKE, s->init_buf->data+5, ret-5, s, s->msg_callback_arg);
+		}
+
+	return ret;
 	}
 
 static int ssl23_get_server_hello(SSL *s)
@@ -322,7 +461,7 @@ static int ssl23_get_server_hello(SSL *s)
 	if ((p[0] & 0x80) && (p[2] == SSL2_MT_SERVER_HELLO) &&
 		(p[5] == 0x00) && (p[6] == 0x02))
 		{
-#ifdef NO_SSL2
+#ifdef OPENSSL_NO_SSL2
 		SSLerr(SSL_F_SSL23_GET_SERVER_HELLO,SSL_R_UNSUPPORTED_PROTOCOL);
 		goto err;
 #else
@@ -358,7 +497,7 @@ static int ssl23_get_server_hello(SSL *s)
 
 		if (s->s3 != NULL) ssl3_free(s);
 
-		if (!BUF_MEM_grow(s->init_buf,
+		if (!BUF_MEM_grow_clean(s->init_buf,
 			SSL2_MAX_RECORD_LENGTH_3_BYTE_HEADER))
 			{
 			SSLerr(SSL_F_SSL23_GET_SERVER_HELLO,ERR_R_BUF_LIB);
@@ -411,6 +550,14 @@ static int ssl23_get_server_hello(SSL *s)
 		if ((p[2] == SSL3_VERSION_MINOR) &&
 			!(s->options & SSL_OP_NO_SSLv3))
 			{
+#ifdef OPENSSL_FIPS
+			if(FIPS_mode())
+				{
+				SSLerr(SSL_F_SSL23_GET_SERVER_HELLO,
+					SSL_R_ONLY_TLS_ALLOWED_IN_FIPS_MODE);
+				goto err;
+				}
+#endif
 			s->version=SSL3_VERSION;
 			s->method=SSLv3_client_method();
 			}
@@ -435,7 +582,7 @@ static int ssl23_get_server_hello(SSL *s)
 		 (p[3] == 0) &&
 		 (p[4] == 2))
 		{
-		void (*cb)()=NULL;
+		void (*cb)(const SSL *ssl,int type,int val)=NULL;
 		int j;
 
 		/* An alert */
@@ -467,7 +614,6 @@ static int ssl23_get_server_hello(SSL *s)
 	if (!ssl_get_new_session(s,0))
 		goto err;
 
-	s->first_packet=1;
 	return(SSL_connect(s));
 err:
 	return(-1);

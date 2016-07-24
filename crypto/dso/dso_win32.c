@@ -1,4 +1,4 @@
-/* dso_win32.c */
+/* dso_win32.c -*- mode:C; c-file-style: "eay" -*- */
 /* Written by Geoff Thorpe (geoff@geoffthorpe.net) for the OpenSSL
  * project 2000.
  */
@@ -61,17 +61,56 @@
 #include "cryptlib.h"
 #include <openssl/dso.h>
 
-#ifndef WIN32
+#if !defined(DSO_WIN32)
 DSO_METHOD *DSO_METHOD_win32(void)
 	{
 	return NULL;
 	}
 #else
 
+#ifdef _WIN32_WCE
+# if _WIN32_WCE < 300
+static FARPROC GetProcAddressA(HMODULE hModule,LPCSTR lpProcName)
+	{
+	WCHAR lpProcNameW[64];
+	int i;
+
+	for (i=0;lpProcName[i] && i<64;i++)
+		lpProcNameW[i] = (WCHAR)lpProcName[i];
+	if (i==64) return NULL;
+	lpProcNameW[i] = 0;
+
+	return GetProcAddressW(hModule,lpProcNameW);
+	}
+# endif
+# undef GetProcAddress
+# define GetProcAddress GetProcAddressA
+
+static HINSTANCE LoadLibraryA(LPCSTR lpLibFileName)
+	{
+	WCHAR *fnamw;
+	size_t len_0=strlen(lpLibFileName)+1,i;
+
+#ifdef _MSC_VER
+	fnamw = (WCHAR *)_alloca (len_0*sizeof(WCHAR));
+#else
+	fnamw = (WCHAR *)alloca (len_0*sizeof(WCHAR));
+#endif
+	if (fnamw == NULL) return NULL;
+
+#if defined(_WIN32_WCE) && _WIN32_WCE>=101
+	if (!MultiByteToWideChar(CP_ACP,0,lpLibFileName,len_0,fnamw,len_0))
+#endif
+		for (i=0;i<len_0;i++) fnamw[i]=(WCHAR)lpLibFileName[i];
+
+	return LoadLibraryW(fnamw);
+	}
+#endif
+
 /* Part of the hack in "win32_load" ... */
 #define DSO_MAX_TRANSLATED_SIZE 256
 
-static int win32_load(DSO *dso, const char *filename);
+static int win32_load(DSO *dso);
 static int win32_unload(DSO *dso);
 static void *win32_bind_var(DSO *dso, const char *symname);
 static DSO_FUNC_TYPE win32_bind_func(DSO *dso, const char *symname);
@@ -80,8 +119,13 @@ static int win32_unbind_var(DSO *dso, char *symname, void *symptr);
 static int win32_unbind_func(DSO *dso, char *symname, DSO_FUNC_TYPE symptr);
 static int win32_init(DSO *dso);
 static int win32_finish(DSO *dso);
-#endif
 static long win32_ctrl(DSO *dso, int cmd, long larg, void *parg);
+#endif
+static char *win32_name_converter(DSO *dso, const char *filename);
+static char *win32_merger(DSO *dso, const char *filespec1,
+	const char *filespec2);
+
+static const char *openssl_strnchr(const char *string, int c, size_t len);
 
 static DSO_METHOD dso_meth_win32 = {
 	"OpenSSL 'win32' shared library method",
@@ -94,7 +138,9 @@ static DSO_METHOD dso_meth_win32 = {
 	NULL, /* unbind_var */
 	NULL, /* unbind_func */
 #endif
-	win32_ctrl,
+	NULL, /* ctrl */
+	win32_name_converter,
+	win32_merger,
 	NULL, /* init */
 	NULL  /* finish */
 	};
@@ -109,50 +155,48 @@ DSO_METHOD *DSO_METHOD_win32(void)
  *     LoadLibrary(), and copied.
  */
 
-static int win32_load(DSO *dso, const char *filename)
+static int win32_load(DSO *dso)
 	{
-	HINSTANCE h, *p;
-	char translated[DSO_MAX_TRANSLATED_SIZE];
-	int len;
+	HINSTANCE h = NULL, *p = NULL;
+	/* See applicable comments from dso_dl.c */
+	char *filename = DSO_convert_filename(dso, NULL);
 
-	/* NB: This is a hideous hack, but I'm not yet sure what
-	 * to replace it with. This attempts to convert any filename,
-	 * that looks like it has no path information, into a
-	 * translated form, e. "blah" -> "blah.dll" ... I'm more
-	 * comfortable putting hacks into win32 code though ;-) */
-	len = strlen(filename);
-	if((dso->flags & DSO_FLAG_NAME_TRANSLATION) &&
-			(len + 4 < DSO_MAX_TRANSLATED_SIZE) &&
-			(strstr(filename, "/") == NULL) &&
-			(strstr(filename, "\\") == NULL) &&
-			(strstr(filename, ":") == NULL))
+	if(filename == NULL)
 		{
-		sprintf(translated, "%s.dll", filename);
-		h = LoadLibrary(translated);
+		DSOerr(DSO_F_WIN32_LOAD,DSO_R_NO_FILENAME);
+		goto err;
 		}
-	else
-		h = LoadLibrary(filename);
+	h = LoadLibraryA(filename);
 	if(h == NULL)
 		{
 		DSOerr(DSO_F_WIN32_LOAD,DSO_R_LOAD_FAILED);
-		return(0);
+		ERR_add_error_data(3, "filename(", filename, ")");
+		goto err;
 		}
 	p = (HINSTANCE *)OPENSSL_malloc(sizeof(HINSTANCE));
 	if(p == NULL)
 		{
 		DSOerr(DSO_F_WIN32_LOAD,ERR_R_MALLOC_FAILURE);
-		FreeLibrary(h);
-		return(0);
+		goto err;
 		}
 	*p = h;
 	if(!sk_push(dso->meth_data, (char *)p))
 		{
 		DSOerr(DSO_F_WIN32_LOAD,DSO_R_STACK_ERROR);
-		FreeLibrary(h);
-		OPENSSL_free(p);
-		return(0);
+		goto err;
 		}
+	/* Success */
+	dso->loaded_filename = filename;
 	return(1);
+err:
+	/* Cleanup !*/
+	if(filename != NULL)
+		OPENSSL_free(filename);
+	if(p != NULL)
+		OPENSSL_free(p);
+	if(h != NULL)
+		FreeLibrary(h);
+	return(0);
 	}
 
 static int win32_unload(DSO *dso)
@@ -211,6 +255,7 @@ static void *win32_bind_var(DSO *dso, const char *symname)
 	if(sym == NULL)
 		{
 		DSOerr(DSO_F_WIN32_BIND_VAR,DSO_R_SYM_FAILURE);
+		ERR_add_error_data(3, "symname(", symname, ")");
 		return(NULL);
 		}
 	return(sym);
@@ -241,33 +286,378 @@ static DSO_FUNC_TYPE win32_bind_func(DSO *dso, const char *symname)
 	if(sym == NULL)
 		{
 		DSOerr(DSO_F_WIN32_BIND_FUNC,DSO_R_SYM_FAILURE);
+		ERR_add_error_data(3, "symname(", symname, ")");
 		return(NULL);
 		}
 	return((DSO_FUNC_TYPE)sym);
 	}
 
-static long win32_ctrl(DSO *dso, int cmd, long larg, void *parg)
-        {
-        if(dso == NULL)
-                {
-                DSOerr(DSO_F_WIN32_CTRL,ERR_R_PASSED_NULL_PARAMETER);
-                return(-1);
-                }
-        switch(cmd)
-                {
-        case DSO_CTRL_GET_FLAGS:
-                return dso->flags;
-        case DSO_CTRL_SET_FLAGS:
-                dso->flags = (int)larg;
-                return(0);
-        case DSO_CTRL_OR_FLAGS:
-                dso->flags |= (int)larg;
-                return(0);
-        default:
-                break;
-                }
-        DSOerr(DSO_F_WIN32_CTRL,DSO_R_UNKNOWN_COMMAND);
-        return(-1);
-        }
+struct file_st
+	{
+	const char *node; int nodelen;
+	const char *device; int devicelen;
+	const char *predir; int predirlen;
+	const char *dir; int dirlen;
+	const char *file; int filelen;
+	};
 
-#endif /* WIN32 */
+static struct file_st *win32_splitter(DSO *dso, const char *filename,
+	int assume_last_is_dir)
+	{
+	struct file_st *result = NULL;
+	enum { IN_NODE, IN_DEVICE, IN_FILE } position;
+	const char *start = filename;
+	char last;
+
+	if (!filename)
+		{
+		DSOerr(DSO_F_WIN32_SPLITTER,DSO_R_NO_FILENAME);
+		/*goto err;*/
+		return(NULL);
+		}
+
+	result = OPENSSL_malloc(sizeof(struct file_st));
+	if(result == NULL)
+		{
+		DSOerr(DSO_F_WIN32_SPLITTER,
+			ERR_R_MALLOC_FAILURE);
+		return(NULL);
+		}
+
+	memset(result, 0, sizeof(struct file_st));
+	position = IN_DEVICE;
+
+	if((filename[0] == '\\' && filename[1] == '\\')
+		|| (filename[0] == '/' && filename[1] == '/'))
+		{
+		position = IN_NODE;
+		filename += 2;
+		start = filename;
+		result->node = start;
+		}
+
+	do
+		{
+		last = filename[0];
+		switch(last)
+			{
+		case ':':
+			if(position != IN_DEVICE)
+				{
+				DSOerr(DSO_F_WIN32_SPLITTER,
+					DSO_R_INCORRECT_FILE_SYNTAX);
+				/*goto err;*/
+				OPENSSL_free(result);
+				return(NULL);
+				}
+			result->device = start;
+			result->devicelen = filename - start;
+			position = IN_FILE;
+			start = ++filename;
+			result->dir = start;
+			break;
+		case '\\':
+		case '/':
+			if(position == IN_NODE)
+				{
+				result->nodelen = filename - start;
+				position = IN_FILE;
+				start = ++filename;
+				result->dir = start;
+				}
+			else if(position == IN_DEVICE)
+				{
+				position = IN_FILE;
+				filename++;
+				result->dir = start;
+				result->dirlen = filename - start;
+				start = filename;
+				}
+			else
+				{
+				filename++;
+				result->dirlen += filename - start;
+				start = filename;
+				}
+			break;
+		case '\0':
+			if(position == IN_NODE)
+				{
+				result->nodelen = filename - start;
+				}
+			else
+				{
+				if(filename - start > 0)
+					{
+					if (assume_last_is_dir)
+						{
+						if (position == IN_DEVICE)
+							{
+							result->dir = start;
+							result->dirlen = 0;
+							}
+						result->dirlen +=
+							filename - start;
+						}
+					else
+						{
+						result->file = start;
+						result->filelen =
+							filename - start;
+						}
+					}
+				}
+			break;
+		default:
+			filename++;
+			break;
+			}
+		}
+	while(last);
+
+	if(!result->nodelen) result->node = NULL;
+	if(!result->devicelen) result->device = NULL;
+	if(!result->dirlen) result->dir = NULL;
+	if(!result->filelen) result->file = NULL;
+
+	return(result);
+	}
+
+static char *win32_joiner(DSO *dso, const struct file_st *file_split)
+	{
+	int len = 0, offset = 0;
+	char *result = NULL;
+	const char *start;
+
+	if(!file_split)
+		{
+		DSOerr(DSO_F_WIN32_JOINER,
+				ERR_R_PASSED_NULL_PARAMETER);
+		return(NULL);
+		}
+	if(file_split->node)
+		{
+		len += 2 + file_split->nodelen;	/* 2 for starting \\ */
+		if(file_split->predir || file_split->dir || file_split->file)
+			len++;	/* 1 for ending \ */
+		}
+	else if(file_split->device)
+		{
+		len += file_split->devicelen + 1; /* 1 for ending : */
+		}
+	len += file_split->predirlen;
+	if(file_split->predir && (file_split->dir || file_split->file))
+		{
+		len++;	/* 1 for ending \ */
+		}
+	len += file_split->dirlen;
+	if(file_split->dir && file_split->file)
+		{
+		len++;	/* 1 for ending \ */
+		}
+	len += file_split->filelen;
+
+	if(!len)
+		{
+		DSOerr(DSO_F_WIN32_JOINER, DSO_R_EMPTY_FILE_STRUCTURE);
+		return(NULL);
+		}
+
+	result = OPENSSL_malloc(len + 1);
+	if (!result)
+		{
+		DSOerr(DSO_F_WIN32_JOINER,
+			ERR_R_MALLOC_FAILURE);
+		return(NULL);
+		}
+
+	if(file_split->node)
+		{
+		strcpy(&result[offset], "\\\\"); offset += 2;
+		strncpy(&result[offset], file_split->node,
+			file_split->nodelen); offset += file_split->nodelen;
+		if(file_split->predir || file_split->dir || file_split->file)
+			{
+			result[offset] = '\\'; offset++;
+			}
+		}
+	else if(file_split->device)
+		{
+		strncpy(&result[offset], file_split->device,
+			file_split->devicelen); offset += file_split->devicelen;
+		result[offset] = ':'; offset++;
+		}
+	start = file_split->predir;
+	while(file_split->predirlen > (start - file_split->predir))
+		{
+		const char *end = openssl_strnchr(start, '/',
+			file_split->predirlen - (start - file_split->predir));
+		if(!end)
+			end = start
+				+ file_split->predirlen
+				- (start - file_split->predir);
+		strncpy(&result[offset], start,
+			end - start); offset += end - start;
+		result[offset] = '\\'; offset++;
+		start = end + 1;
+		}
+#if 0 /* Not needed, since the directory converter above already appeneded
+	 a backslash */
+	if(file_split->predir && (file_split->dir || file_split->file))
+		{
+		result[offset] = '\\'; offset++;
+		}
+#endif
+	start = file_split->dir;
+	while(file_split->dirlen > (start - file_split->dir))
+		{
+		const char *end = openssl_strnchr(start, '/',
+			file_split->dirlen - (start - file_split->dir));
+		if(!end)
+			end = start
+				+ file_split->dirlen
+				- (start - file_split->dir);
+		strncpy(&result[offset], start,
+			end - start); offset += end - start;
+		result[offset] = '\\'; offset++;
+		start = end + 1;
+		}
+#if 0 /* Not needed, since the directory converter above already appeneded
+	 a backslash */
+	if(file_split->dir && file_split->file)
+		{
+		result[offset] = '\\'; offset++;
+		}
+#endif
+	strncpy(&result[offset], file_split->file,
+		file_split->filelen); offset += file_split->filelen;
+	result[offset] = '\0';
+	return(result);
+	}
+
+static char *win32_merger(DSO *dso, const char *filespec1, const char *filespec2)
+	{
+	char *merged = NULL;
+	struct file_st *filespec1_split = NULL;
+	struct file_st *filespec2_split = NULL;
+
+	if(!filespec1 && !filespec2)
+		{
+		DSOerr(DSO_F_WIN32_MERGER,
+				ERR_R_PASSED_NULL_PARAMETER);
+		return(NULL);
+		}
+	if (!filespec2)
+		{
+		merged = OPENSSL_malloc(strlen(filespec1) + 1);
+		if(!merged)
+			{
+			DSOerr(DSO_F_WIN32_MERGER,
+				ERR_R_MALLOC_FAILURE);
+			return(NULL);
+			}
+		strcpy(merged, filespec1);
+		}
+	else if (!filespec1)
+		{
+		merged = OPENSSL_malloc(strlen(filespec2) + 1);
+		if(!merged)
+			{
+			DSOerr(DSO_F_WIN32_MERGER,
+				ERR_R_MALLOC_FAILURE);
+			return(NULL);
+			}
+		strcpy(merged, filespec2);
+		}
+	else
+		{
+		filespec1_split = win32_splitter(dso, filespec1, 0);
+		if (!filespec1_split)
+			{
+			DSOerr(DSO_F_WIN32_MERGER,
+				ERR_R_MALLOC_FAILURE);
+			return(NULL);
+			}
+		filespec2_split = win32_splitter(dso, filespec2, 1);
+		if (!filespec2_split)
+			{
+			DSOerr(DSO_F_WIN32_MERGER,
+				ERR_R_MALLOC_FAILURE);
+			OPENSSL_free(filespec1_split);
+			return(NULL);
+			}
+
+		/* Fill in into filespec1_split */
+		if (!filespec1_split->node && !filespec1_split->device)
+			{
+			filespec1_split->node = filespec2_split->node;
+			filespec1_split->nodelen = filespec2_split->nodelen;
+			filespec1_split->device = filespec2_split->device;
+			filespec1_split->devicelen = filespec2_split->devicelen;
+			}
+		if (!filespec1_split->dir)
+			{
+			filespec1_split->dir = filespec2_split->dir;
+			filespec1_split->dirlen = filespec2_split->dirlen;
+			}
+		else if (filespec1_split->dir[0] != '\\'
+			&& filespec1_split->dir[0] != '/')
+			{
+			filespec1_split->predir = filespec2_split->dir;
+			filespec1_split->predirlen = filespec2_split->dirlen;
+			}
+		if (!filespec1_split->file)
+			{
+			filespec1_split->file = filespec2_split->file;
+			filespec1_split->filelen = filespec2_split->filelen;
+			}
+
+		merged = win32_joiner(dso, filespec1_split);
+		}
+	OPENSSL_free(filespec1_split);
+	OPENSSL_free(filespec2_split);
+	return(merged);
+	}
+
+static char *win32_name_converter(DSO *dso, const char *filename)
+	{
+	char *translated;
+	int len, transform;
+
+	len = strlen(filename);
+	transform = ((strstr(filename, "/") == NULL) &&
+			(strstr(filename, "\\") == NULL) &&
+			(strstr(filename, ":") == NULL));
+	if(transform)
+		/* We will convert this to "%s.dll" */
+		translated = OPENSSL_malloc(len + 5);
+	else
+		/* We will simply duplicate filename */
+		translated = OPENSSL_malloc(len + 1);
+	if(translated == NULL)
+		{
+		DSOerr(DSO_F_WIN32_NAME_CONVERTER,
+				DSO_R_NAME_TRANSLATION_FAILED); 
+		return(NULL);   
+		}
+	if(transform)
+		sprintf(translated, "%s.dll", filename);
+	else
+		sprintf(translated, "%s", filename);
+	return(translated);
+	}
+
+static const char *openssl_strnchr(const char *string, int c, size_t len)
+	{
+	size_t i;
+	const char *p;
+	for (i = 0, p = string; i < len && *p; i++, p++)
+		{
+		if (*p == c)
+			return p;
+		}
+	return NULL;
+	}
+
+
+#endif /* OPENSSL_SYS_WIN32 */

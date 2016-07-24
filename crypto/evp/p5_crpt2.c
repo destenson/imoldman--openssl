@@ -1,5 +1,5 @@
 /* p5_crpt2.c */
-/* Written by Dr Stephen N Henson (shenson@bigfoot.com) for the OpenSSL
+/* Written by Dr Stephen N Henson (steve@openssl.org) for the OpenSSL
  * project 1999.
  */
 /* ====================================================================
@@ -55,13 +55,13 @@
  * Hudson (tjh@cryptsoft.com).
  *
  */
-#if !defined(NO_HMAC) && !defined(NO_SHA)
 #include <stdio.h>
 #include <stdlib.h>
+#include "cryptlib.h"
+#if !defined(OPENSSL_NO_HMAC) && !defined(OPENSSL_NO_SHA)
 #include <openssl/x509.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
-#include "cryptlib.h"
 
 /* set this to print out info about the keygen algorithm */
 /* #define DEBUG_PKCS5V2 */
@@ -77,13 +77,15 @@
  */
 
 int PKCS5_PBKDF2_HMAC_SHA1(const char *pass, int passlen,
-			   unsigned char *salt, int saltlen, int iter,
+			   const unsigned char *salt, int saltlen, int iter,
 			   int keylen, unsigned char *out)
 {
 	unsigned char digtmp[SHA_DIGEST_LENGTH], *p, itmp[4];
 	int cplen, j, k, tkeylen;
 	unsigned long i = 1;
 	HMAC_CTX hctx;
+
+	HMAC_CTX_init(&hctx);
 	p = out;
 	tkeylen = keylen;
 	if(!pass) passlen = 0;
@@ -98,7 +100,7 @@ int PKCS5_PBKDF2_HMAC_SHA1(const char *pass, int passlen,
 		itmp[1] = (unsigned char)((i >> 16) & 0xff);
 		itmp[2] = (unsigned char)((i >> 8) & 0xff);
 		itmp[3] = (unsigned char)(i & 0xff);
-		HMAC_Init(&hctx, pass, passlen, EVP_sha1());
+		HMAC_Init_ex(&hctx, pass, passlen, EVP_sha1(), NULL);
 		HMAC_Update(&hctx, salt, saltlen);
 		HMAC_Update(&hctx, itmp, 4);
 		HMAC_Final(&hctx, digtmp, NULL);
@@ -112,7 +114,7 @@ int PKCS5_PBKDF2_HMAC_SHA1(const char *pass, int passlen,
 		i++;
 		p+= cplen;
 	}
-	HMAC_cleanup(&hctx);
+	HMAC_CTX_cleanup(&hctx);
 #ifdef DEBUG_PKCS5V2
 	fprintf(stderr, "Password:\n");
 	h__dump (pass, passlen);
@@ -143,19 +145,26 @@ main()
  */
 
 int PKCS5_v2_PBE_keyivgen(EVP_CIPHER_CTX *ctx, const char *pass, int passlen,
-                         ASN1_TYPE *param, EVP_CIPHER *c, EVP_MD *md,
+                         ASN1_TYPE *param, const EVP_CIPHER *c, const EVP_MD *md,
                          int en_de)
 {
-	unsigned char *pbuf, *salt, key[EVP_MAX_KEY_LENGTH];
-	int saltlen, keylen, iter, plen;
+	unsigned char *salt, key[EVP_MAX_KEY_LENGTH];
+	const unsigned char *pbuf;
+	int saltlen, iter, plen;
+	unsigned int keylen;
 	PBE2PARAM *pbe2 = NULL;
 	const EVP_CIPHER *cipher;
 	PBKDF2PARAM *kdf = NULL;
 
+	if (param == NULL || param->type != V_ASN1_SEQUENCE ||
+	    param->value.sequence == NULL) {
+		EVPerr(EVP_F_PKCS5_V2_PBE_KEYIVGEN,EVP_R_DECODE_ERROR);
+		return 0;
+	}
+
 	pbuf = param->value.sequence->data;
 	plen = param->value.sequence->length;
-	if(!param || (param->type != V_ASN1_SEQUENCE) ||
-				   !(pbe2 = d2i_PBE2PARAM(NULL, &pbuf, plen))) {
+	if(!(pbe2 = d2i_PBE2PARAM(NULL, &pbuf, plen))) {
 		EVPerr(EVP_F_PKCS5_V2_PBE_KEYIVGEN,EVP_R_DECODE_ERROR);
 		return 0;
 	}
@@ -181,21 +190,27 @@ int PKCS5_v2_PBE_keyivgen(EVP_CIPHER_CTX *ctx, const char *pass, int passlen,
 	}
 
 	/* Fixup cipher based on AlgorithmIdentifier */
-	EVP_CipherInit(ctx, cipher, NULL, NULL, en_de);
+	EVP_CipherInit_ex(ctx, cipher, NULL, NULL, NULL, en_de);
 	if(EVP_CIPHER_asn1_to_param(ctx, pbe2->encryption->parameter) < 0) {
 		EVPerr(EVP_F_PKCS5_V2_PBE_KEYIVGEN,
 					EVP_R_CIPHER_PARAMETER_ERROR);
 		goto err;
 	}
 	keylen = EVP_CIPHER_CTX_key_length(ctx);
+	OPENSSL_assert(keylen <= sizeof key);
 
 	/* Now decode key derivation function */
 
+	if(!pbe2->keyfunc->parameter ||
+		 (pbe2->keyfunc->parameter->type != V_ASN1_SEQUENCE))
+		{
+		EVPerr(EVP_F_PKCS5_V2_PBE_KEYIVGEN,EVP_R_DECODE_ERROR);
+		goto err;
+		}
+
 	pbuf = pbe2->keyfunc->parameter->value.sequence->data;
 	plen = pbe2->keyfunc->parameter->value.sequence->length;
-	if(!pbe2->keyfunc->parameter ||
-		 (pbe2->keyfunc->parameter->type != V_ASN1_SEQUENCE) ||
-				!(kdf = d2i_PBKDF2PARAM(NULL, &pbuf, plen)) ) {
+	if(!(kdf = d2i_PBKDF2PARAM(NULL, &pbuf, plen)) ) {
 		EVPerr(EVP_F_PKCS5_V2_PBE_KEYIVGEN,EVP_R_DECODE_ERROR);
 		goto err;
 	}
@@ -205,7 +220,7 @@ int PKCS5_v2_PBE_keyivgen(EVP_CIPHER_CTX *ctx, const char *pass, int passlen,
 
 	/* Now check the parameters of the kdf */
 
-	if(kdf->keylength && (ASN1_INTEGER_get(kdf->keylength) != keylen)){
+	if(kdf->keylength && (ASN1_INTEGER_get(kdf->keylength) != (int)keylen)){
 		EVPerr(EVP_F_PKCS5_V2_PBE_KEYIVGEN,
 						EVP_R_UNSUPPORTED_KEYLENGTH);
 		goto err;
@@ -227,8 +242,8 @@ int PKCS5_v2_PBE_keyivgen(EVP_CIPHER_CTX *ctx, const char *pass, int passlen,
 	saltlen = kdf->salt->value.octet_string->length;
 	iter = ASN1_INTEGER_get(kdf->iter);
 	PKCS5_PBKDF2_HMAC_SHA1(pass, passlen, salt, saltlen, iter, keylen, key);
-	EVP_CipherInit(ctx, NULL, key, NULL, en_de);
-	memset(key, 0, keylen);
+	EVP_CipherInit_ex(ctx, NULL, NULL, key, NULL, en_de);
+	OPENSSL_cleanse(key, keylen);
 	PBKDF2PARAM_free(kdf);
 	return 1;
 

@@ -56,12 +56,20 @@
  * [including the GNU Public Licence.]
  */
 
+/* We need to define this to get macros like S_IFBLK and S_IFCHR */
+#define _XOPEN_SOURCE 500
+
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef VMS
+#include "e_os.h"
+#include <openssl/crypto.h>
+#include <openssl/rand.h>
+#include <openssl/buffer.h>
+
+#ifdef OPENSSL_SYS_VMS
 #include <unixio.h>
 #endif
 #ifndef NO_SYS_TYPES_H
@@ -73,15 +81,29 @@
 # include <sys/stat.h>
 #endif
 
-#include <openssl/e_os.h>
-#include <openssl/crypto.h>
-#include <openssl/rand.h>
+#ifdef _WIN32
+#define stat	_stat
+#define chmod	_chmod
+#define open	_open
+#define fdopen	_fdopen
+#endif
 
 #undef BUFSIZE
 #define BUFSIZE	1024
 #define RAND_DATA 1024
 
+#ifdef OPENSSL_SYS_VMS
+/* This declaration is a nasty hack to get around vms' extension to fopen
+ * for passing in sharing options being disabled by our /STANDARD=ANSI89 */
+static FILE *(*const vms_fopen)(const char *, const char *, ...) =
+    (FILE *(*)(const char *, const char *, ...))fopen;
+#define VMS_OPEN_ATTRS "shr=get,put,upd,del","ctx=bin,stm","rfm=stm","rat=none","mrs=0"
+#endif
+
 /* #define RFILE ".rnd" - defined in ../../e_os.h */
+
+/* Note that these functions are intended for seed files only.
+ * Entropy devices and EGD sockets are handled in rand_unix.c */
 
 int RAND_load_file(const char *file, long bytes)
 	{
@@ -95,14 +117,35 @@ int RAND_load_file(const char *file, long bytes)
 
 	if (file == NULL) return(0);
 
-	i=stat(file,&sb);
-	/* If the state fails, put some crap in anyway */
-	RAND_add(&sb,sizeof(sb),0);
-	if (i < 0) return(0);
+#ifdef PURIFY
+	/* struct stat can have padding and unused fields that may not be
+	 * initialized in the call to stat(). We need to clear the entire
+	 * structure before calling RAND_add() to avoid complaints from
+	 * applications such as Valgrind.
+	 */
+	memset(&sb, 0, sizeof(sb));
+#endif
+
+	if (stat(file,&sb) < 0) return(0);
+	RAND_add(&sb,sizeof(sb),0.0);
 	if (bytes == 0) return(ret);
 
+#ifdef OPENSSL_SYS_VMS
+	in=vms_fopen(file,"rb",VMS_OPEN_ATTRS);
+#else
 	in=fopen(file,"rb");
+#endif
 	if (in == NULL) goto err;
+#if defined(S_ISBLK) && defined(S_ISCHR)
+	if (S_ISBLK(sb.st_mode) || S_ISCHR(sb.st_mode)) {
+	  /* this file is a device. we don't want read an infinite number
+	   * of bytes from a random device, nor do we want to use buffered
+	   * I/O because we will waste system entropy. 
+	   */
+	  bytes = (bytes == -1) ? 2048 : bytes; /* ok, is 2048 enough? */
+	  setvbuf(in, NULL, _IONBF, 0); /* don't do buffered reads */
+	}
+#endif
 	for (;;)
 		{
 		if (bytes > 0)
@@ -111,17 +154,21 @@ int RAND_load_file(const char *file, long bytes)
 			n = BUFSIZE;
 		i=fread(buf,1,n,in);
 		if (i <= 0) break;
+#ifdef PURIFY
+		RAND_add(buf,i,(double)i);
+#else
 		/* even if n != i, use the full array */
-		RAND_add(buf,n,i);
+		RAND_add(buf,n,(double)i);
+#endif
 		ret+=i;
 		if (bytes > 0)
 			{
 			bytes-=n;
-			if (bytes == 0) break;
+			if (bytes <= 0) break;
 			}
 		}
 	fclose(in);
-	memset(buf,0,BUFSIZE);
+	OPENSSL_cleanse(buf,BUFSIZE);
 err:
 	return(ret);
 	}
@@ -132,8 +179,24 @@ int RAND_write_file(const char *file)
 	int i,ret=0,rand_err=0;
 	FILE *out = NULL;
 	int n;
+	struct stat sb;
 	
-#if defined(O_CREAT) && !defined(WIN32)
+	i=stat(file,&sb);
+	if (i != -1) { 
+#if defined(S_ISBLK) && defined(S_ISCHR)
+	  if (S_ISBLK(sb.st_mode) || S_ISCHR(sb.st_mode)) {
+	    /* this file is a device. we don't write back to it. 
+	     * we "succeed" on the assumption this is some sort 
+	     * of random device. Otherwise attempting to write to 
+	     * and chmod the device causes problems.
+	     */
+	    return(1); 
+	  }
+#endif
+	}
+
+#if defined(O_CREAT) && !defined(OPENSSL_SYS_WIN32) && !defined(OPENSSL_SYS_VMS)
+	{
 	/* For some reason Win32 can't write to files created this way */
 	
 	/* chmod(..., 0600) is too late to protect the file,
@@ -141,9 +204,36 @@ int RAND_write_file(const char *file)
 	int fd = open(file, O_CREAT, 0600);
 	if (fd != -1)
 		out = fdopen(fd, "wb");
+	}
 #endif
+
+#ifdef OPENSSL_SYS_VMS
+	/* VMS NOTE: Prior versions of this routine created a _new_
+	 * version of the rand file for each call into this routine, then
+	 * deleted all existing versions named ;-1, and finally renamed
+	 * the current version as ';1'. Under concurrent usage, this
+	 * resulted in an RMS race condition in rename() which could
+	 * orphan files (see vms message help for RMS$_REENT). With the
+	 * fopen() calls below, openssl/VMS now shares the top-level
+	 * version of the rand file. Note that there may still be
+	 * conditions where the top-level rand file is locked. If so, this
+	 * code will then create a new version of the rand file. Without
+	 * the delete and rename code, this can result in ascending file
+	 * versions that stop at version 32767, and this routine will then
+	 * return an error. The remedy for this is to recode the calling
+	 * application to avoid concurrent use of the rand file, or
+	 * synchronize usage at the application level. Also consider
+	 * whether or not you NEED a persistent rand file in a concurrent
+	 * use situation. 
+	 */
+
+	out = vms_fopen(file,"rb+",VMS_OPEN_ATTRS);
+	if (out == NULL)
+		out = vms_fopen(file,"wb",VMS_OPEN_ATTRS);
+#else
 	if (out == NULL)
 		out = fopen(file,"wb");
+#endif
 	if (out == NULL) goto err;
 
 #ifndef NO_CHMOD
@@ -165,56 +255,70 @@ int RAND_write_file(const char *file)
 		ret+=i;
 		if (n <= 0) break;
                 }
-#ifdef VMS
-	/* Try to delete older versions of the file, until there aren't
-	   any */
-	{
-	char *tmpf;
-
-	tmpf = OPENSSL_malloc(strlen(file) + 4);  /* to add ";-1" and a nul */
-	if (tmpf)
-		{
-		strcpy(tmpf, file);
-		strcat(tmpf, ";-1");
-		while(delete(tmpf) == 0)
-			;
-		rename(file,";1"); /* Make sure it's version 1, or we
-				      will reach the limit (32767) at
-				      some point... */
-		}
-	}
-#endif /* VMS */
 
 	fclose(out);
-	memset(buf,0,BUFSIZE);
+	OPENSSL_cleanse(buf,BUFSIZE);
 err:
 	return (rand_err ? -1 : ret);
 	}
 
-const char *RAND_file_name(char *buf, int size)
+const char *RAND_file_name(char *buf, size_t size)
 	{
-	char *s;
-	char *ret=NULL;
+	char *s=NULL;
+#ifdef __OpenBSD__
+	int ok = 0;
+	struct stat sb;
+#endif
 
-	s=getenv("RANDFILE");
-	if (s != NULL)
+	if (OPENSSL_issetugid() == 0)
+		s=getenv("RANDFILE");
+	if (s != NULL && *s && strlen(s) + 1 < size)
 		{
-		strncpy(buf,s,size-1);
-		buf[size-1]='\0';
-		ret=buf;
+		if (BUF_strlcpy(buf,s,size) >= size)
+			return NULL;
 		}
 	else
 		{
-		s=getenv("HOME");
-		if (s == NULL) return(RFILE);
-		if (((int)(strlen(s)+strlen(RFILE)+2)) > size)
-			return(RFILE);
-		strcpy(buf,s);
-#ifndef VMS
-		strcat(buf,"/");
+		if (OPENSSL_issetugid() == 0)
+			s=getenv("HOME");
+#ifdef DEFAULT_HOME
+		if (s == NULL)
+			{
+			s = DEFAULT_HOME;
+			}
 #endif
-		strcat(buf,RFILE);
-		ret=buf;
+		if (s && *s && strlen(s)+strlen(RFILE)+2 < size)
+			{
+			BUF_strlcpy(buf,s,size);
+#ifndef OPENSSL_SYS_VMS
+			BUF_strlcat(buf,"/",size);
+#endif
+			BUF_strlcat(buf,RFILE,size);
+#ifdef __OpenBSD__
+			ok = 1;
+#endif
+			}
+		else
+		  	buf[0] = '\0'; /* no file name */
 		}
-	return(ret);
+
+#ifdef __OpenBSD__
+	/* given that all random loads just fail if the file can't be 
+	 * seen on a stat, we stat the file we're returning, if it
+	 * fails, use /dev/arandom instead. this allows the user to 
+	 * use their own source for good random data, but defaults
+	 * to something hopefully decent if that isn't available. 
+	 */
+
+	if (!ok)
+		if (BUF_strlcpy(buf,"/dev/arandom",size) >= size) {
+			return(NULL);
+		}	
+	if (stat(buf,&sb) == -1)
+		if (BUF_strlcpy(buf,"/dev/arandom",size) >= size) {
+			return(NULL);
+		}	
+
+#endif
+	return(buf);
 	}

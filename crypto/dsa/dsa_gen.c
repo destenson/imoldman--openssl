@@ -61,28 +61,47 @@
 #ifdef GENUINE_DSA
 /* Parameter generation follows the original release of FIPS PUB 186,
  * Appendix 2.2 (i.e. use SHA as defined in FIPS PUB 180) */
-#define HASH    SHA
+#define HASH    EVP_sha()
 #else
 /* Parameter generation follows the updated Appendix 2.2 for FIPS PUB 186,
  * also Appendix 2.2 of FIPS PUB 186-1 (i.e. use SHA as defined in
  * FIPS PUB 180-1) */
-#define HASH    SHA1
+#define HASH    EVP_sha1()
 #endif 
 
-#ifndef NO_SHA
+#include <openssl/opensslconf.h> /* To see if OPENSSL_NO_SHA is defined */
+
+#ifndef OPENSSL_NO_SHA
 
 #include <stdio.h>
 #include <time.h>
 #include "cryptlib.h"
-#include <openssl/sha.h>
+#include <openssl/evp.h>
 #include <openssl/bn.h>
 #include <openssl/dsa.h>
 #include <openssl/rand.h>
+#include <openssl/sha.h>
 
-DSA *DSA_generate_parameters(int bits, unsigned char *seed_in, int seed_len,
-		int *counter_ret, unsigned long *h_ret,
-		void (*callback)(int, int, void *),
-		void *cb_arg)
+#ifndef OPENSSL_FIPS
+
+static int dsa_builtin_paramgen(DSA *ret, int bits,
+		unsigned char *seed_in, int seed_len,
+		int *counter_ret, unsigned long *h_ret, BN_GENCB *cb);
+
+int DSA_generate_parameters_ex(DSA *ret, int bits,
+		unsigned char *seed_in, int seed_len,
+		int *counter_ret, unsigned long *h_ret, BN_GENCB *cb)
+	{
+	if(ret->meth->dsa_paramgen)
+		return ret->meth->dsa_paramgen(ret, bits, seed_in, seed_len,
+				counter_ret, h_ret, cb);
+	return dsa_builtin_paramgen(ret, bits, seed_in, seed_len,
+			counter_ret, h_ret, cb);
+	}
+
+static int dsa_builtin_paramgen(DSA *ret, int bits,
+		unsigned char *seed_in, int seed_len,
+		int *counter_ret, unsigned long *h_ret, BN_GENCB *cb)
 	{
 	int ok=0;
 	unsigned char seed[SHA_DIGEST_LENGTH];
@@ -91,42 +110,46 @@ DSA *DSA_generate_parameters(int bits, unsigned char *seed_in, int seed_len,
 	BIGNUM *r0,*W,*X,*c,*test;
 	BIGNUM *g=NULL,*q=NULL,*p=NULL;
 	BN_MONT_CTX *mont=NULL;
-	int k,n=0,i,b,m=0;
+	int k,n=0,i,m=0;
 	int counter=0;
 	int r=0;
-	BN_CTX *ctx=NULL,*ctx2=NULL,*ctx3=NULL;
+	BN_CTX *ctx=NULL;
 	unsigned int h=2;
-	DSA *ret=NULL;
 
 	if (bits < 512) bits=512;
 	bits=(bits+63)/64*64;
 
-	if (seed_len < 20)
+	/* NB: seed_len == 0 is special case: copy generated seed to
+ 	 * seed_in if it is not NULL.
+ 	 */
+	if (seed_len && (seed_len < 20))
 		seed_in = NULL; /* seed buffer too small -- ignore */
 	if (seed_len > 20) 
 		seed_len = 20; /* App. 2.2 of FIPS PUB 186 allows larger SEED,
 		                * but our internal buffers are restricted to 160 bits*/
 	if ((seed_in != NULL) && (seed_len == 20))
+		{
 		memcpy(seed,seed_in,seed_len);
+		/* set seed_in to NULL to avoid it being copied back */
+		seed_in = NULL;
+		}
 
 	if ((ctx=BN_CTX_new()) == NULL) goto err;
-	if ((ctx2=BN_CTX_new()) == NULL) goto err;
-	if ((ctx3=BN_CTX_new()) == NULL) goto err;
-	if ((ret=DSA_new()) == NULL) goto err;
 
 	if ((mont=BN_MONT_CTX_new()) == NULL) goto err;
 
-	BN_CTX_start(ctx2);
-	r0 = BN_CTX_get(ctx2);
-	g = BN_CTX_get(ctx2);
-	W = BN_CTX_get(ctx2);
-	q = BN_CTX_get(ctx2);
-	X = BN_CTX_get(ctx2);
-	c = BN_CTX_get(ctx2);
-	p = BN_CTX_get(ctx2);
-	test = BN_CTX_get(ctx2);
+	BN_CTX_start(ctx);
+	r0 = BN_CTX_get(ctx);
+	g = BN_CTX_get(ctx);
+	W = BN_CTX_get(ctx);
+	q = BN_CTX_get(ctx);
+	X = BN_CTX_get(ctx);
+	c = BN_CTX_get(ctx);
+	p = BN_CTX_get(ctx);
+	test = BN_CTX_get(ctx);
 
-	BN_lshift(test,BN_value_one(),bits-1);
+	if (!BN_lshift(test,BN_value_one(),bits-1))
+		goto err;
 
 	for (;;)
 		{
@@ -135,7 +158,8 @@ DSA *DSA_generate_parameters(int bits, unsigned char *seed_in, int seed_len,
 			int seed_is_random;
 
 			/* step 1 */
-			if (callback != NULL) callback(0,m++,cb_arg);
+			if(!BN_GENCB_call(cb, 0, m++))
+				goto err;
 
 			if (!seed_len)
 				{
@@ -157,8 +181,8 @@ DSA *DSA_generate_parameters(int bits, unsigned char *seed_in, int seed_len,
 				}
 
 			/* step 2 */
-			HASH(seed,SHA_DIGEST_LENGTH,md);
-			HASH(buf,SHA_DIGEST_LENGTH,buf2);
+			EVP_Digest(seed,SHA_DIGEST_LENGTH,md,NULL,HASH, NULL);
+			EVP_Digest(buf,SHA_DIGEST_LENGTH,buf2,NULL,HASH, NULL);
 			for (i=0; i<SHA_DIGEST_LENGTH; i++)
 				md[i]^=buf2[i];
 
@@ -168,7 +192,8 @@ DSA *DSA_generate_parameters(int bits, unsigned char *seed_in, int seed_len,
 			if (!BN_bin2bn(md,SHA_DIGEST_LENGTH,q)) goto err;
 
 			/* step 4 */
-			r = BN_is_prime_fasttest(q, DSS_prime_checks, callback, ctx3, cb_arg, seed_is_random);
+			r = BN_is_prime_fasttest_ex(q, DSS_prime_checks, ctx,
+					seed_is_random, cb);
 			if (r > 0)
 				break;
 			if (r != 0)
@@ -178,20 +203,19 @@ DSA *DSA_generate_parameters(int bits, unsigned char *seed_in, int seed_len,
 			/* step 5 */
 			}
 
-		if (callback != NULL) callback(2,0,cb_arg);
-		if (callback != NULL) callback(3,0,cb_arg);
+		if(!BN_GENCB_call(cb, 2, 0)) goto err;
+		if(!BN_GENCB_call(cb, 3, 0)) goto err;
 
 		/* step 6 */
 		counter=0;
 		/* "offset = 2" */
 
 		n=(bits-1)/160;
-		b=(bits-1)-n*160;
 
 		for (;;)
 			{
-			if (callback != NULL && counter != 0)
-				callback(0,counter,cb_arg);
+			if ((counter != 0) && !BN_GENCB_call(cb, 0, counter))
+				goto err;
 
 			/* step 7 */
 			BN_zero(W);
@@ -205,31 +229,32 @@ DSA *DSA_generate_parameters(int bits, unsigned char *seed_in, int seed_len,
 					if (buf[i] != 0) break;
 					}
 
-				HASH(buf,SHA_DIGEST_LENGTH,md);
+				EVP_Digest(buf,SHA_DIGEST_LENGTH,md,NULL,HASH, NULL);
 
 				/* step 8 */
 				if (!BN_bin2bn(md,SHA_DIGEST_LENGTH,r0))
 					goto err;
-				BN_lshift(r0,r0,160*k);
-				BN_add(W,W,r0);
+				if (!BN_lshift(r0,r0,160*k)) goto err;
+				if (!BN_add(W,W,r0)) goto err;
 				}
 
 			/* more of step 8 */
-			BN_mask_bits(W,bits-1);
-			BN_copy(X,W); /* this should be ok */
-			BN_add(X,X,test); /* this should be ok */
+			if (!BN_mask_bits(W,bits-1)) goto err;
+			if (!BN_copy(X,W)) goto err;
+			if (!BN_add(X,X,test)) goto err;
 
 			/* step 9 */
-			BN_lshift1(r0,q);
-			BN_mod(c,X,r0,ctx);
-			BN_sub(r0,c,BN_value_one());
-			BN_sub(p,X,r0);
+			if (!BN_lshift1(r0,q)) goto err;
+			if (!BN_mod(c,X,r0,ctx)) goto err;
+			if (!BN_sub(r0,c,BN_value_one())) goto err;
+			if (!BN_sub(p,X,r0)) goto err;
 
 			/* step 10 */
 			if (BN_cmp(p,test) >= 0)
 				{
 				/* step 11 */
-				r = BN_is_prime_fasttest(p, DSS_prime_checks, callback, ctx3, cb_arg, 1);
+				r = BN_is_prime_fasttest_ex(p, DSS_prime_checks,
+						ctx, 1, cb);
 				if (r > 0)
 						goto end; /* found it */
 				if (r != 0)
@@ -245,50 +270,55 @@ DSA *DSA_generate_parameters(int bits, unsigned char *seed_in, int seed_len,
 			}
 		}
 end:
-	if (callback != NULL) callback(2,1,cb_arg);
+	if(!BN_GENCB_call(cb, 2, 1))
+		goto err;
 
 	/* We now need to generate g */
 	/* Set r0=(p-1)/q */
-	BN_sub(test,p,BN_value_one());
-	BN_div(r0,NULL,test,q,ctx);
+	if (!BN_sub(test,p,BN_value_one())) goto err;
+	if (!BN_div(r0,NULL,test,q,ctx)) goto err;
 
-	BN_set_word(test,h);
-	BN_MONT_CTX_set(mont,p,ctx);
+	if (!BN_set_word(test,h)) goto err;
+	if (!BN_MONT_CTX_set(mont,p,ctx)) goto err;
 
 	for (;;)
 		{
 		/* g=test^r0%p */
-		BN_mod_exp_mont(g,test,r0,p,ctx,mont);
+		if (!BN_mod_exp_mont(g,test,r0,p,ctx,mont)) goto err;
 		if (!BN_is_one(g)) break;
-		BN_add(test,test,BN_value_one());
+		if (!BN_add(test,test,BN_value_one())) goto err;
 		h++;
 		}
 
-	if (callback != NULL) callback(3,1,cb_arg);
+	if(!BN_GENCB_call(cb, 3, 1))
+		goto err;
 
 	ok=1;
 err:
-	if (!ok)
+	if (ok)
 		{
-		if (ret != NULL) DSA_free(ret);
-		}
-	else
-		{
+		if(ret->p) BN_free(ret->p);
+		if(ret->q) BN_free(ret->q);
+		if(ret->g) BN_free(ret->g);
 		ret->p=BN_dup(p);
 		ret->q=BN_dup(q);
 		ret->g=BN_dup(g);
-		if ((m > 1) && (seed_in != NULL)) memcpy(seed_in,seed,20);
+		if (ret->p == NULL || ret->q == NULL || ret->g == NULL)
+			{
+			ok=0;
+			goto err;
+			}
+		if (seed_in != NULL) memcpy(seed_in,seed,20);
 		if (counter_ret != NULL) *counter_ret=counter;
 		if (h_ret != NULL) *h_ret=h;
 		}
-	if (ctx != NULL) BN_CTX_free(ctx);
-	if (ctx2 != NULL)
+	if(ctx)
 		{
-		BN_CTX_end(ctx2);
-		BN_CTX_free(ctx2);
+		BN_CTX_end(ctx);
+		BN_CTX_free(ctx);
 		}
-	if (ctx3 != NULL) BN_CTX_free(ctx3);
 	if (mont != NULL) BN_MONT_CTX_free(mont);
-	return(ok?ret:NULL);
+	return ok;
 	}
+#endif
 #endif

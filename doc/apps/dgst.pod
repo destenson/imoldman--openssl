@@ -14,9 +14,11 @@ B<openssl> B<dgst>
 [B<-binary>]
 [B<-out filename>]
 [B<-sign filename>]
+[B<-passin arg>]
 [B<-verify filename>]
 [B<-prverify filename>]
 [B<-signature filename>]
+[B<-hmac key>]
 [B<file...>]
 
 [B<md5|md4|md2|sha1|sha|mdc2|ripemd160>]
@@ -59,6 +61,11 @@ filename to output to, or standard output by default.
 
 digitally sign the digest using the private key in "filename".
 
+=item B<-passin arg>
+
+the private key password source. For more information about the format of B<arg>
+see the B<PASS PHRASE ARGUMENTS> section in L<openssl(1)|openssl(1)>.
+
 =item B<-verify filename>
 
 verify the signature using the the public key in "filename".
@@ -71,6 +78,10 @@ verify the signature using the  the private key in "filename".
 =item B<-signature filename>
 
 the actual signature to verify.
+
+=item B<-hmac key>
+
+create a hashed MAC using "key".
 
 =item B<-rand file(s)>
 

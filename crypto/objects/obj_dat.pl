@@ -1,5 +1,11 @@
 #!/usr/local/bin/perl
 
+# fixes bug in floating point emulation on sparc64 when
+# this script produces off-by-one output on sparc64
+eval 'use integer;';
+
+print STDERR "Warning: perl module integer not found.\n" if ($@);
+
 sub obj_cmp
 	{
 	local(@a,@b,$_,$r);
@@ -90,7 +96,7 @@ for ($i=0; $i<$n; $i++)
 	{
 	if (!defined($nid{$i}))
 		{
-		push(@out,"{NULL,NULL,NID_undef,0,NULL},\n");
+		push(@out,"{NULL,NULL,NID_undef,0,NULL,0},\n");
 		}
 	else
 		{
@@ -134,7 +140,7 @@ for ($i=0; $i<$n; $i++)
 			}
 		else
 			{
-			$out.="0,NULL";
+			$out.="0,NULL,0";
 			}
 		$out.="},\n";
 		push(@out,$out);
@@ -164,7 +170,13 @@ foreach (sort obj_cmp @a)
 	}
 
 print OUT <<'EOF';
-/* lib/obj/obj_dat.h */
+/* crypto/objects/obj_dat.h */
+
+/* THIS FILE IS GENERATED FROM objects.h by obj_dat.pl via the
+ * following command:
+ * perl obj_dat.pl obj_mac.h obj_dat.h
+ */
+
 /* Copyright (C) 1995-1997 Eric Young (eay@cryptsoft.com)
  * All rights reserved.
  *
@@ -220,11 +232,6 @@ print OUT <<'EOF';
  * derivative of this code cannot be changed.  i.e. this code cannot simply be
  * copied and put under another distribution licence
  * [including the GNU Public Licence.]
- */
-
-/* THIS FILE IS GENERATED FROM Objects.h by obj_dat.pl via the
- * following command:
- * perl obj_dat.pl objects.h obj_dat.h
  */
 
 EOF

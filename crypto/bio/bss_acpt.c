@@ -56,21 +56,21 @@
  * [including the GNU Public Licence.]
  */
 
-#ifndef NO_SOCK
-
 #include <stdio.h>
 #include <errno.h>
 #define USE_SOCKETS
 #include "cryptlib.h"
 #include <openssl/bio.h>
 
-#ifdef WIN16
+#ifndef OPENSSL_NO_SOCK
+
+#ifdef OPENSSL_SYS_WIN16
 #define SOCKET_PROTOCOL 0 /* more microsoft stupidity */
 #else
 #define SOCKET_PROTOCOL IPPROTO_TCP
 #endif
 
-#if (defined(VMS) && __VMS_VER < 70000000)
+#if (defined(OPENSSL_SYS_VMS) && __VMS_VER < 70000000)
 /* FIONBIO used as a switch to enable ioctl, and that isn't in VMS < 7.0 */
 #undef FIONBIO
 #endif
@@ -236,8 +236,20 @@ again:
 			c->state=ACPT_S_OK;
 			goto again;
 			}
+		BIO_clear_retry_flags(b);
+		b->retry_reason=0;
 		i=BIO_accept(c->accept_sock,&(c->addr));
+
+		/* -2 return means we should retry */
+		if(i == -2)
+			{
+			BIO_set_retry_special(b);
+			b->retry_reason=BIO_RR_ACCEPT;
+			return -1;
+			}
+
 		if (i < 0) return(i);
+
 		bio=BIO_new_socket(i,BIO_CLOSE);
 		if (bio == NULL) goto err;
 
@@ -328,7 +340,6 @@ static int acpt_write(BIO *b, const char *in, int inl)
 
 static long acpt_ctrl(BIO *b, int cmd, long num, void *ptr)
 	{
-	BIO *dbio;
 	int *ip;
 	long ret=1;
 	BIO_ACCEPT *data;
@@ -425,8 +436,8 @@ static long acpt_ctrl(BIO *b, int cmd, long num, void *ptr)
 		ret=(long)data->bind_mode;
 		break;
 	case BIO_CTRL_DUP:
-		dbio=(BIO *)ptr;
-/*		if (data->param_port) EAY EAY
+/*		dbio=(BIO *)ptr;
+		if (data->param_port) EAY EAY
 			BIO_set_port(dbio,data->param_port);
 		if (data->param_hostname)
 			BIO_set_hostname(dbio,data->param_hostname);

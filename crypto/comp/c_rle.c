@@ -17,6 +17,7 @@ static COMP_METHOD rle_method={
 	rle_compress_block,
 	rle_expand_block,
 	NULL,
+	NULL,
 	};
 
 COMP_METHOD *COMP_rle(void)
@@ -45,7 +46,7 @@ static int rle_expand_block(COMP_CTX *ctx, unsigned char *out,
 	{
 	int i;
 
-	if (olen < (ilen-1))
+	if (ilen == 0 || olen < (ilen-1))
 		{
 		/* ZZZZZZZZZZZZZZZZZZZZZZ */
 		return(-1);
@@ -58,4 +59,3 @@ static int rle_expand_block(COMP_CTX *ctx, unsigned char *out,
 		}
 	return(ilen-1);
 	}
-

@@ -83,7 +83,7 @@ const char *X509_verify_cert_error_string(long n)
 	case X509_V_ERR_UNABLE_TO_DECRYPT_CERT_SIGNATURE:
 		return("unable to decrypt certificate's signature");
 	case X509_V_ERR_UNABLE_TO_DECRYPT_CRL_SIGNATURE:
-		return("unable to decrypt CRL's's signature");
+		return("unable to decrypt CRL's signature");
 	case X509_V_ERR_UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY:
 		return("unable to decode issuer public key");
 	case X509_V_ERR_CERT_SIGNATURE_FAILURE:
@@ -95,7 +95,7 @@ const char *X509_verify_cert_error_string(long n)
 	case X509_V_ERR_CRL_NOT_YET_VALID:
 		return("CRL is not yet valid");
 	case X509_V_ERR_CERT_HAS_EXPIRED:
-		return("Certificate has expired");
+		return("certificate has expired");
 	case X509_V_ERR_CRL_HAS_EXPIRED:
 		return("CRL has expired");
 	case X509_V_ERR_ERROR_IN_CERT_NOT_BEFORE_FIELD:
@@ -122,8 +122,14 @@ const char *X509_verify_cert_error_string(long n)
 		return("certificate revoked");
 	case X509_V_ERR_INVALID_CA:
 		return ("invalid CA certificate");
+	case X509_V_ERR_INVALID_NON_CA:
+		return ("invalid non-CA certificate (has CA markings)");
 	case X509_V_ERR_PATH_LENGTH_EXCEEDED:
 		return ("path length constraint exceeded");
+	case X509_V_ERR_PROXY_PATH_LENGTH_EXCEEDED:
+		return("proxy path length constraint exceeded");
+	case X509_V_ERR_PROXY_CERTIFICATES_NOT_ALLOWED:
+		return("proxy certificates not allowed, please set the appropriate flag");
 	case X509_V_ERR_INVALID_PURPOSE:
 		return ("unsupported certificate purpose");
 	case X509_V_ERR_CERT_UNTRUSTED:
@@ -140,9 +146,26 @@ const char *X509_verify_cert_error_string(long n)
 		return("authority and issuer serial number mismatch");
 	case X509_V_ERR_KEYUSAGE_NO_CERTSIGN:
 		return("key usage does not include certificate signing");
-
+	case X509_V_ERR_UNABLE_TO_GET_CRL_ISSUER:
+		return("unable to get CRL issuer certificate");
+	case X509_V_ERR_UNHANDLED_CRITICAL_EXTENSION:
+		return("unhandled critical extension");
+	case X509_V_ERR_KEYUSAGE_NO_CRL_SIGN:
+		return("key usage does not include CRL signing");
+	case X509_V_ERR_KEYUSAGE_NO_DIGITAL_SIGNATURE:
+		return("key usage does not include digital signature");
+	case X509_V_ERR_UNHANDLED_CRITICAL_CRL_EXTENSION:
+		return("unhandled critical CRL extension");
+	case X509_V_ERR_INVALID_EXTENSION:
+		return("invalid or inconsistent certificate extension");
+	case X509_V_ERR_INVALID_POLICY_EXTENSION:
+		return("invalid or inconsistent certificate policy extension");
+	case X509_V_ERR_NO_EXPLICIT_POLICY:
+		return("no explicit policy");
+	case X509_V_ERR_UNNESTED_RESOURCE:
+		return("RFC 3779 resource not subset of parent's resources");
 	default:
-		sprintf(buf,"error number %ld",n);
+		BIO_snprintf(buf,sizeof buf,"error number %ld",n);
 		return(buf);
 		}
 	}

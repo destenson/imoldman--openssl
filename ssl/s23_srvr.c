@@ -55,19 +55,72 @@
  * copied and put under another distribution licence
  * [including the GNU Public Licence.]
  */
+/* ====================================================================
+ * Copyright (c) 1998-2001 The OpenSSL Project.  All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer. 
+ *
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in
+ *    the documentation and/or other materials provided with the
+ *    distribution.
+ *
+ * 3. All advertising materials mentioning features or use of this
+ *    software must display the following acknowledgment:
+ *    "This product includes software developed by the OpenSSL Project
+ *    for use in the OpenSSL Toolkit. (http://www.openssl.org/)"
+ *
+ * 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
+ *    endorse or promote products derived from this software without
+ *    prior written permission. For written permission, please contact
+ *    openssl-core@openssl.org.
+ *
+ * 5. Products derived from this software may not be called "OpenSSL"
+ *    nor may "OpenSSL" appear in their names without prior written
+ *    permission of the OpenSSL Project.
+ *
+ * 6. Redistributions of any form whatsoever must retain the following
+ *    acknowledgment:
+ *    "This product includes software developed by the OpenSSL Project
+ *    for use in the OpenSSL Toolkit (http://www.openssl.org/)"
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
+ * EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
+ * ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+ * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
+ * OF THE POSSIBILITY OF SUCH DAMAGE.
+ * ====================================================================
+ *
+ * This product includes cryptographic software written by Eric Young
+ * (eay@cryptsoft.com).  This product includes software written by Tim
+ * Hudson (tjh@cryptsoft.com).
+ *
+ */
 
 #include <stdio.h>
+#include "ssl_locl.h"
 #include <openssl/buffer.h>
 #include <openssl/rand.h>
 #include <openssl/objects.h>
 #include <openssl/evp.h>
-#include "ssl_locl.h"
 
 static SSL_METHOD *ssl23_get_server_method(int ver);
 int ssl23_get_client_hello(SSL *s);
 static SSL_METHOD *ssl23_get_server_method(int ver)
 	{
-#ifndef NO_SSL2
+#ifndef OPENSSL_NO_SSL2
 	if (ver == SSL2_VERSION)
 		return(SSLv2_server_method());
 #endif
@@ -79,27 +132,16 @@ static SSL_METHOD *ssl23_get_server_method(int ver)
 		return(NULL);
 	}
 
-SSL_METHOD *SSLv23_server_method(void)
-	{
-	static int init=1;
-	static SSL_METHOD SSLv23_server_data;
-
-	if (init)
-		{
-		memcpy((char *)&SSLv23_server_data,
-			(char *)sslv23_base_method(),sizeof(SSL_METHOD));
-		SSLv23_server_data.ssl_accept=ssl23_accept;
-		SSLv23_server_data.get_ssl_method=ssl23_get_server_method;
-		init=0;
-		}
-	return(&SSLv23_server_data);
-	}
+IMPLEMENT_ssl23_meth_func(SSLv23_server_method,
+			ssl23_accept,
+			ssl_undefined_function,
+			ssl23_get_server_method)
 
 int ssl23_accept(SSL *s)
 	{
 	BUF_MEM *buf;
-	unsigned long Time=time(NULL);
-	void (*cb)()=NULL;
+	unsigned long Time=(unsigned long)time(NULL);
+	void (*cb)(const SSL *ssl,int type,int val)=NULL;
 	int ret= -1;
 	int new_state,state;
 
@@ -112,8 +154,8 @@ int ssl23_accept(SSL *s)
 	else if (s->ctx->info_callback != NULL)
 		cb=s->ctx->info_callback;
 	
-	if (!SSL_in_init(s) || SSL_in_before(s)) SSL_clear(s); 
 	s->in_handshake++;
+	if (!SSL_in_init(s) || SSL_in_before(s)) SSL_clear(s); 
 
 	for (;;)
 		{
@@ -179,9 +221,9 @@ int ssl23_accept(SSL *s)
 			}
 		}
 end:
+	s->in_handshake--;
 	if (cb != NULL)
 		cb(s,SSL_CB_ACCEPT_EXIT,ret);
-	s->in_handshake--;
 	return(ret);
 	}
 
@@ -202,15 +244,12 @@ int ssl23_get_client_hello(SSL *s)
 	                     *  9/10  client_version  /
 	                     */
 	char *buf= &(buf_space[0]);
-	unsigned char *p,*d,*dd;
+	unsigned char *p,*d,*d_len,*dd;
 	unsigned int i;
 	unsigned int csl,sil,cl;
 	int n=0,j;
 	int type=0;
 	int v[2];
-#ifndef NO_RSA
-	int use_sslv2_strong=0;
-#endif
 
 	if (s->state ==	SSL23_ST_SR_CLNT_HELLO_A)
 		{
@@ -270,94 +309,45 @@ int ssl23_get_client_hello(SSL *s)
 				else if (!(s->options & SSL_OP_NO_SSLv2))
 					type=1;
 
-				if (s->options & SSL_OP_NON_EXPORT_FIRST)
-					/* Not only utterly confusing, but broken
-					 * ('fractured programming'?) -- the details
-					 * of this block nearly make it work
-					 * as intended in this environment, but on one
-					 * of the fine points (w.r.t. restarts) it fails.
-					 * The obvious fix would be even more devastating
-					 * to program structure; if you want the functionality,
-					 * throw this away and implement it in a way
-					 * that makes sense */
-					{
-#if 0
-					STACK_OF(SSL_CIPHER) *sk;
-					SSL_CIPHER *c;
-					int ne2,ne3;
-
-					j=((p[0]&0x7f)<<8)|p[1];
-					if (j > (1024*4))
-						{
-						SSLerr(SSL_F_SSL23_GET_CLIENT_HELLO,SSL_R_RECORD_TOO_LARGE);
-						goto err;
-						}
-
-					n=ssl23_read_bytes(s,j+2);
-					if (n <= 0) return(n);
-					p=s->packet;
-
-					if ((buf=OPENSSL_malloc(n)) == NULL)
-						{
-						SSLerr(SSL_F_SSL23_GET_CLIENT_HELLO,ERR_R_MALLOC_FAILURE);
-						goto err;
-						}
-					memcpy(buf,p,n);
-
-					p+=5;
-					n2s(p,csl);
-					p+=4;
-
-					sk=ssl_bytes_to_cipher_list(
-						s,p,csl,NULL);
-					if (sk != NULL)
-						{
-						ne2=ne3=0;
-						for (j=0; j<sk_SSL_CIPHER_num(sk); j++)
-							{
-							c=sk_SSL_CIPHER_value(sk,j);
-							if (!SSL_C_IS_EXPORT(c))
-								{
-								if ((c->id>>24L) == 2L)
-									ne2=1;
-								else
-									ne3=1;
-								}
-							}
-						if (ne2 && !ne3)
-							{
-							type=1;
-							use_sslv2_strong=1;
-							goto next_bit;
-							}
-						}
-#else
-					SSLerr(SSL_F_SSL23_GET_CLIENT_HELLO,SSL_R_UNSUPPORTED_OPTION);
-					goto err;
-#endif
-					}
 				}
 			}
 		else if ((p[0] == SSL3_RT_HANDSHAKE) &&
 			 (p[1] == SSL3_VERSION_MAJOR) &&
 			 (p[5] == SSL3_MT_CLIENT_HELLO) &&
 			 ((p[3] == 0 && p[4] < 5 /* silly record length? */)
-				|| (p[9] == p[1])))
+				|| (p[9] >= p[1])))
 			{
 			/*
 			 * SSLv3 or tls1 header
 			 */
 			
-			v[0]=p[1]; /* major version */
+			v[0]=p[1]; /* major version (= SSL3_VERSION_MAJOR) */
 			/* We must look at client_version inside the Client Hello message
-			 * to get the correct minor version: */
-			v[1]=p[10];
-			/* However if we have only a pathologically small fragment of the
-			 * Client Hello message, we simply use the version from the
-			 * record header -- this is incorrect but unlikely to fail in
-			 * practice */
+			 * to get the correct minor version.
+			 * However if we have only a pathologically small fragment of the
+			 * Client Hello message, this would be difficult, and we'd have
+			 * to read more records to find out.
+			 * No known SSL 3.0 client fragments ClientHello like this,
+			 * so we simply assume TLS 1.0 to avoid protocol version downgrade
+			 * attacks. */
 			if (p[3] == 0 && p[4] < 6)
-				v[1]=p[2];
+				{
+#if 0
+				SSLerr(SSL_F_SSL23_GET_CLIENT_HELLO,SSL_R_RECORD_TOO_SMALL);
+				goto err;
+#else
+				v[1] = TLS1_VERSION_MINOR;
+#endif
+				}
+			/* if major version number > 3 set minor to a value
+			 * which will use the highest version 3 we support.
+			 * If TLS 2.0 ever appears we will need to revise
+			 * this....
+			 */
+			else if (p[9] > SSL3_VERSION_MAJOR)
+				v[1]=0xff;
+			else
+				v[1]=p[10]; /* minor version according to client_version */
 			if (v[1] >= TLS1_VERSION_MINOR)
 				{
 				if (!(s->options & SSL_OP_NO_TLSv1))
@@ -371,10 +361,21 @@ int ssl23_get_client_hello(SSL *s)
 					type=3;
 					}
 				}
-			else if (!(s->options & SSL_OP_NO_SSLv3))
+			else
 				{
-				s->version=SSL3_VERSION;
-				type=3;
+				/* client requests SSL 3.0 */
+				if (!(s->options & SSL_OP_NO_SSLv3))
+					{
+					s->version=SSL3_VERSION;
+					type=3;
+					}
+				else if (!(s->options & SSL_OP_NO_TLSv1))
+					{
+					/* we won't be able to use TLS of course,
+					 * but this will send an appropriate alert */
+					s->version=TLS1_VERSION;
+					type=3;
+					}
 				}
 			}
 		else if ((strncmp("GET ", (char *)p,4) == 0) ||
@@ -391,6 +392,15 @@ int ssl23_get_client_hello(SSL *s)
 			goto err;
 			}
 		}
+
+#ifdef OPENSSL_FIPS
+	if (FIPS_mode() && (s->version < TLS1_VERSION))
+		{
+		SSLerr(SSL_F_SSL23_GET_CLIENT_HELLO,
+					SSL_R_ONLY_TLS_ALLOWED_IN_FIPS_MODE);
+		goto err;
+		}
+#endif
 
 	if (s->state == SSL23_ST_SR_CLNT_HELLO_B)
 		{
@@ -412,7 +422,9 @@ int ssl23_get_client_hello(SSL *s)
 		j=ssl23_read_bytes(s,n+2);
 		if (j <= 0) return(j);
 
-		ssl3_finish_mac(s,&(s->packet[2]),s->packet_length-2);
+		ssl3_finish_mac(s, s->packet+2, s->packet_length-2);
+		if (s->msg_callback)
+			s->msg_callback(0, SSL2_VERSION, 0, s->packet+2, s->packet_length-2, s, s->msg_callback_arg); /* CLIENT-HELLO */
 
 		p=s->packet;
 		p+=5;
@@ -426,6 +438,13 @@ int ssl23_get_client_hello(SSL *s)
 			goto err;
 			}
 
+		/* record header: msg_type ... */
+		*(d++) = SSL3_MT_CLIENT_HELLO;
+		/* ... and length (actual value will be written later) */
+		d_len = d;
+		d += 3;
+
+		/* client_version */
 		*(d++) = SSL3_VERSION_MAJOR; /* == v[0] */
 		*(d++) = v[1];
 
@@ -456,7 +475,8 @@ int ssl23_get_client_hello(SSL *s)
 		*(d++)=1;
 		*(d++)=0;
 		
-		i=(d-(unsigned char *)s->init_buf->data);
+		i = (d-(unsigned char *)s->init_buf->data) - 4;
+		l2n3((long)i, d_len);
 
 		/* get the data reused from the init_buf */
 		s->s3->tmp.reuse_message=1;
@@ -469,7 +489,7 @@ int ssl23_get_client_hello(SSL *s)
 
 	if (type == 1)
 		{
-#ifdef NO_SSL2
+#ifdef OPENSSL_NO_SSL2
 		SSLerr(SSL_F_SSL23_GET_CLIENT_HELLO,SSL_R_UNSUPPORTED_PROTOCOL);
 		goto err;
 #else
@@ -487,16 +507,14 @@ int ssl23_get_client_hello(SSL *s)
 
 		if (s->s3 != NULL) ssl3_free(s);
 
-		if (!BUF_MEM_grow(s->init_buf,
+		if (!BUF_MEM_grow_clean(s->init_buf,
 			SSL2_MAX_RECORD_LENGTH_3_BYTE_HEADER))
 			{
 			goto err;
 			}
 
 		s->state=SSL2_ST_GET_CLIENT_HELLO_A;
-		if ((s->options & SSL_OP_MSIE_SSLV2_RSA_PADDING) ||
-			use_sslv2_strong ||
-			(s->options & SSL_OP_NO_TLSv1 && s->options & SSL_OP_NO_SSLv3))
+		if (s->options & SSL_OP_NO_TLSv1 && s->options & SSL_OP_NO_SSLv3)
 			s->s2->ssl2_rollback=0;
 		else
 			/* reject SSL 2.0 session if client supports SSL 3.0 or TLS 1.0
@@ -563,7 +581,6 @@ int ssl23_get_client_hello(SSL *s)
 	s->init_num=0;
 
 	if (buf != buf_space) OPENSSL_free(buf);
-	s->first_packet=1;
 	return(SSL_accept(s));
 err:
 	if (buf != buf_space) OPENSSL_free(buf);

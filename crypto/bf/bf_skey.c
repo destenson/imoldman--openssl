@@ -59,17 +59,22 @@
 #include <stdio.h>
 #include <string.h>
 #include <openssl/blowfish.h>
+#include <openssl/crypto.h>
+#ifdef OPENSSL_FIPS
+#include <openssl/fips.h>
+#endif
+
 #include "bf_locl.h"
 #include "bf_pi.h"
 
-void BF_set_key(BF_KEY *key, int len, const unsigned char *data)
+FIPS_NON_FIPS_VCIPHER_Init(BF)
 	{
 	int i;
 	BF_LONG *p,ri,in[2];
 	const unsigned char *d,*end;
 
 
-	memcpy((char *)key,(char *)&bf_init,sizeof(BF_KEY));
+	memcpy(key,&bf_init,sizeof(BF_KEY));
 	p=key->P;
 
 	if (len > ((BF_ROUNDS+2)*4)) len=(BF_ROUNDS+2)*4;

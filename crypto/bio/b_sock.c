@@ -56,33 +56,41 @@
  * [including the GNU Public Licence.]
  */
 
-#ifndef NO_SOCK
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
 #define USE_SOCKETS
 #include "cryptlib.h"
 #include <openssl/bio.h>
+#if defined(OPENSSL_SYS_NETWARE) && defined(NETWARE_BSDSOCK)
+#include <netdb.h>
+#if defined(NETWARE_CLIB)
+#include <sys/ioctl.h>
+NETDB_DEFINE_CONTEXT
+#endif
+#endif
 
-#ifdef WIN16
+#ifndef OPENSSL_NO_SOCK
+
+#ifdef OPENSSL_SYS_WIN16
 #define SOCKET_PROTOCOL 0 /* more microsoft stupidity */
 #else
 #define SOCKET_PROTOCOL IPPROTO_TCP
 #endif
 
 #ifdef SO_MAXCONN
-#define MAX_LISTEN  SOMAXCONN
-#elif defined(SO_MAXCONN)
 #define MAX_LISTEN  SO_MAXCONN
+#elif defined(SOMAXCONN)
+#define MAX_LISTEN  SOMAXCONN
 #else
 #define MAX_LISTEN  32
 #endif
 
-#ifdef WINDOWS
+#if defined(OPENSSL_SYS_WINDOWS) || (defined(OPENSSL_SYS_NETWARE) && !defined(NETWARE_BSDSOCK))
 static int wsa_init_done=0;
 #endif
 
+#if 0
 static unsigned long BIO_ghbn_hits=0L;
 static unsigned long BIO_ghbn_miss=0L;
 
@@ -93,10 +101,13 @@ static struct ghbn_cache_st
 	struct hostent *ent;
 	unsigned long order;
 	} ghbn_cache[GHBN_NUM];
+#endif
 
 static int get_ip(const char *str,unsigned char *ip);
+#if 0
 static void ghbn_free(struct hostent *a);
 static struct hostent *ghbn_dup(struct hostent *a);
+#endif
 int BIO_get_host_ip(const char *str, unsigned char *ip)
 	{
 	int i;
@@ -113,8 +124,8 @@ int BIO_get_host_ip(const char *str, unsigned char *ip)
 
 	/* At this point, we have something that is most probably correct
 	   in some way, so let's init the socket. */
-	if (!BIO_sock_init())
-		return(0); /* don't generate another error code here */
+	if (BIO_sock_init() != 1)
+		return 0; /* don't generate another error code here */
 
 	/* If the string actually contained an IP address, we need not do
 	   anything more */
@@ -171,11 +182,11 @@ int BIO_get_port(const char *str, unsigned short *port_ptr)
 		/* Note: under VMS with SOCKETSHR, it seems like the first
 		 * parameter is 'char *', instead of 'const char *'
 		 */
- 		s=getservbyname(
 #ifndef CONST_STRICT
-		    (char *)
+		s=getservbyname((char *)str,"tcp");
+#else
+		s=getservbyname(str,"tcp");
 #endif
-		    str,"tcp");
 		if(s != NULL)
 			*port_ptr=ntohs((unsigned short)s->s_port);
 		CRYPTO_w_unlock(CRYPTO_LOCK_GETSERVBYNAME);
@@ -228,6 +239,7 @@ int BIO_sock_error(int sock)
 		return(j);
 	}
 
+#if 0
 long BIO_ghbn_ctrl(int cmd, int iarg, char *parg)
 	{
 	int i;
@@ -265,7 +277,9 @@ long BIO_ghbn_ctrl(int cmd, int iarg, char *parg)
 		}
 	return(1);
 	}
+#endif
 
+#if 0
 static struct hostent *ghbn_dup(struct hostent *a)
 	{
 	struct hostent *ret;
@@ -343,20 +357,31 @@ static void ghbn_free(struct hostent *a)
 	OPENSSL_free(a);
 	}
 
+#endif
+
 struct hostent *BIO_gethostbyname(const char *name)
 	{
+#if 1
+	/* Caching gethostbyname() results forever is wrong,
+	 * so we have to let the true gethostbyname() worry about this */
+#if (defined(NETWARE_BSDSOCK) && !defined(__NOVELL_LIBC__))
+	return gethostbyname((char*)name);
+#else
+	return gethostbyname(name);
+#endif
+#else
 	struct hostent *ret;
 	int i,lowi=0,j;
 	unsigned long low= (unsigned long)-1;
 
-/*	return(gethostbyname(name)); */
 
-#if 0 /* It doesn't make sense to use locking here: The function interface
-	   * is not thread-safe, because threads can never be sure when
-	   * some other thread destroys the data they were given a pointer to.
-	   */
+#  if 0
+	/* It doesn't make sense to use locking here: The function interface
+	 * is not thread-safe, because threads can never be sure when
+	 * some other thread destroys the data they were given a pointer to.
+	 */
 	CRYPTO_w_lock(CRYPTO_LOCK_GETHOSTBYNAME);
-#endif
+#  endif
 	j=strlen(name);
 	if (j < 128)
 		{
@@ -383,21 +408,22 @@ struct hostent *BIO_gethostbyname(const char *name)
 		/* Note: under VMS with SOCKETSHR, it seems like the first
 		 * parameter is 'char *', instead of 'const char *'
 		 */
-		ret=gethostbyname(
-#ifndef CONST_STRICT
-		    (char *)
-#endif
-		    name);
+#  ifndef CONST_STRICT
+		ret=gethostbyname((char *)name);
+#  else
+		ret=gethostbyname(name);
+#  endif
 
 		if (ret == NULL)
 			goto end;
 		if (j > 128) /* too big to cache */
 			{
-#if 0 /* If we were trying to make this function thread-safe (which
-	   * is bound to fail), we'd have to give up in this case
-	   * (or allocate more memory). */
+#  if 0
+			/* If we were trying to make this function thread-safe (which
+			 * is bound to fail), we'd have to give up in this case
+			 * (or allocate more memory). */
 			ret = NULL;
-#endif
+#  endif
 			goto end;
 			}
 
@@ -421,24 +447,23 @@ struct hostent *BIO_gethostbyname(const char *name)
 		ghbn_cache[i].order=BIO_ghbn_miss+BIO_ghbn_hits;
 		}
 end:
-#if 0
+#  if 0
 	CRYPTO_w_unlock(CRYPTO_LOCK_GETHOSTBYNAME);
-#endif
+#  endif
 	return(ret);
+#endif
 	}
+
 
 int BIO_sock_init(void)
 	{
-#ifdef WINDOWS
+#ifdef OPENSSL_SYS_WINDOWS
 	static struct WSAData wsa_state;
 
 	if (!wsa_init_done)
 		{
 		int err;
 	  
-#ifdef SIGINT
-		signal(SIGINT,(void (*)(int))BIO_sock_cleanup);
-#endif
 		wsa_init_done=1;
 		memset(&wsa_state,0,sizeof(wsa_state));
 		if (WSAStartup(0x0101,&wsa_state)!=0)
@@ -449,29 +474,67 @@ int BIO_sock_init(void)
 			return(-1);
 			}
 		}
-#endif /* WINDOWS */
+#endif /* OPENSSL_SYS_WINDOWS */
+#ifdef WATT32
+	extern int _watt_do_exit;
+	_watt_do_exit = 0;    /* don't make sock_init() call exit() */
+	if (sock_init())
+		return (-1);
+#endif
+
+#if defined(OPENSSL_SYS_NETWARE) && !defined(NETWARE_BSDSOCK)
+    WORD wVerReq;
+    WSADATA wsaData;
+    int err;
+
+    if (!wsa_init_done)
+    {
+        wsa_init_done=1;
+        wVerReq = MAKEWORD( 2, 0 );
+        err = WSAStartup(wVerReq,&wsaData);
+        if (err != 0)
+        {
+            SYSerr(SYS_F_WSASTARTUP,err);
+            BIOerr(BIO_F_BIO_SOCK_INIT,BIO_R_WSASTARTUP);
+            return(-1);
+			}
+		}
+#endif
+
 	return(1);
 	}
 
 void BIO_sock_cleanup(void)
 	{
-#ifdef WINDOWS
+#ifdef OPENSSL_SYS_WINDOWS
 	if (wsa_init_done)
 		{
 		wsa_init_done=0;
-		WSACancelBlockingCall();
+#ifndef OPENSSL_SYS_WINCE
+		WSACancelBlockingCall();	/* Winsock 1.1 specific */
+#endif
 		WSACleanup();
+		}
+#elif defined(OPENSSL_SYS_NETWARE) && !defined(NETWARE_BSDSOCK)
+   if (wsa_init_done)
+        {
+        wsa_init_done=0;
+        WSACleanup();
 		}
 #endif
 	}
 
-#if !defined(VMS) || __VMS_VER >= 70000000
+#if !defined(OPENSSL_SYS_VMS) || __VMS_VER >= 70000000
 
-int BIO_socket_ioctl(int fd, long type, unsigned long *arg)
+int BIO_socket_ioctl(int fd, long type, void *arg)
 	{
 	int i;
 
+#ifdef __DJGPP__
+	i=ioctlsocket(fd,type,(char *)arg);
+#else
 	i=ioctlsocket(fd,type,arg);
+#endif /* __DJGPP__ */
 	if (i < 0)
 		SYSerr(SYS_F_IOCTLSOCKET,get_last_socket_error());
 	return(i);
@@ -494,16 +557,16 @@ static int get_ip(const char *str, unsigned char ip[4])
 			{
 			ok=1;
 			tmp[num]=tmp[num]*10+c-'0';
-			if (tmp[num] > 255) return(-1);
+			if (tmp[num] > 255) return(0);
 			}
 		else if (c == '.')
 			{
 			if (!ok) return(-1);
-			if (num == 3) break;
+			if (num == 3) return(0);
 			num++;
 			ok=0;
 			}
-		else if ((num == 3) && ok)
+		else if (c == '\0' && (num == 3) && ok)
 			break;
 		else
 			return(0);
@@ -519,15 +582,15 @@ int BIO_get_accept_socket(char *host, int bind_mode)
 	{
 	int ret=0;
 	struct sockaddr_in server,client;
-	int s= -1,cs;
+	int s=INVALID_SOCKET,cs;
 	unsigned char ip[4];
 	unsigned short port;
-	char *str,*e;
+	char *str=NULL,*e;
 	const char *h,*p;
 	unsigned long l;
 	int err_num;
 
-	if (!BIO_sock_init()) return(INVALID_SOCKET);
+	if (BIO_sock_init() != 1) return(INVALID_SOCKET);
 
 	if ((str=BUF_strdup(host)) == NULL) return(INVALID_SOCKET);
 
@@ -553,7 +616,7 @@ int BIO_get_accept_socket(char *host, int bind_mode)
 		h="*";
 		}
 
-	if (!BIO_get_port(p,&port)) return(INVALID_SOCKET);
+	if (!BIO_get_port(p,&port)) goto err;
 
 	memset((char *)&server,0,sizeof(server));
 	server.sin_family=AF_INET;
@@ -563,7 +626,7 @@ int BIO_get_accept_socket(char *host, int bind_mode)
 		server.sin_addr.s_addr=INADDR_ANY;
 	else
 		{
-		if (!BIO_get_host_ip(h,&(ip[0]))) return(INVALID_SOCKET);
+                if (!BIO_get_host_ip(h,&(ip[0]))) goto err;
 		l=(unsigned long)
 			((unsigned long)ip[0]<<24L)|
 			((unsigned long)ip[1]<<16L)|
@@ -596,7 +659,14 @@ again:
 #ifdef SO_REUSEADDR
 		err_num=get_last_socket_error();
 		if ((bind_mode == BIO_BIND_REUSEADDR_IF_UNUSED) &&
+#ifdef OPENSSL_SYS_WINDOWS
+			/* Some versions of Windows define EADDRINUSE to
+			 * a dummy value.
+			 */
+			(err_num == WSAEADDRINUSE))
+#else
 			(err_num == EADDRINUSE))
+#endif
 			{
 			memcpy((char *)&client,(char *)&server,sizeof(server));
 			if (strcmp(h,"*") == 0)
@@ -661,6 +731,7 @@ int BIO_accept(int sock, char **addr)
 	ret=accept(sock,(struct sockaddr *)&from,(void *)&len);
 	if (ret == INVALID_SOCKET)
 		{
+		if(BIO_sock_should_retry(ret)) return -2;
 		SYSerr(SYS_F_ACCEPT,get_last_socket_error());
 		BIOerr(BIO_F_BIO_ACCEPT,BIO_R_ACCEPT_ERROR);
 		goto end;
@@ -679,12 +750,12 @@ int BIO_accept(int sock, char **addr)
 			}
 		*addr=p;
 		}
-	sprintf(*addr,"%d.%d.%d.%d:%d",
-		(unsigned char)(l>>24L)&0xff,
-		(unsigned char)(l>>16L)&0xff,
-		(unsigned char)(l>> 8L)&0xff,
-		(unsigned char)(l     )&0xff,
-		port);
+	BIO_snprintf(*addr,24,"%d.%d.%d.%d:%d",
+		     (unsigned char)(l>>24L)&0xff,
+		     (unsigned char)(l>>16L)&0xff,
+		     (unsigned char)(l>> 8L)&0xff,
+		     (unsigned char)(l     )&0xff,
+		     port);
 end:
 	return(ret);
 	}
@@ -712,7 +783,7 @@ int BIO_set_tcp_ndelay(int s, int on)
 int BIO_socket_nbio(int s, int mode)
 	{
 	int ret= -1;
-	unsigned long l;
+	int l;
 
 	l=mode;
 #ifdef FIONBIO

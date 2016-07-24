@@ -68,11 +68,12 @@
 #include <stdio.h>
 #include "cryptlib.h"
 #include <openssl/stack.h>
+#include <openssl/objects.h>
 
 #undef MIN_NODES
 #define MIN_NODES	4
 
-const char *STACK_version="Stack" OPENSSL_VERSION_PTEXT;
+const char STACK_version[]="Stack" OPENSSL_VERSION_PTEXT;
 
 #include <errno.h>
 
@@ -106,6 +107,8 @@ STACK *sk_dup(STACK *sk)
 	ret->comp=sk->comp;
 	return(ret);
 err:
+	if(ret)
+		sk_free(ret);
 	return(NULL);
 	}
 
@@ -120,9 +123,9 @@ STACK *sk_new(int (*c)(const char * const *, const char * const *))
 	int i;
 
 	if ((ret=(STACK *)OPENSSL_malloc(sizeof(STACK))) == NULL)
-		goto err0;
+		goto err;
 	if ((ret->data=(char **)OPENSSL_malloc(sizeof(char *)*MIN_NODES)) == NULL)
-		goto err1;
+		goto err;
 	for (i=0; i<MIN_NODES; i++)
 		ret->data[i]=NULL;
 	ret->comp=c;
@@ -130,9 +133,9 @@ STACK *sk_new(int (*c)(const char * const *, const char * const *))
 	ret->num=0;
 	ret->sorted=0;
 	return(ret);
-err1:
-	OPENSSL_free(ret);
-err0:
+err:
+	if(ret)
+		OPENSSL_free(ret);
 	return(NULL);
 	}
 
@@ -189,8 +192,7 @@ char *sk_delete(STACK *st, int loc)
 	char *ret;
 	int i,j;
 
-	if ((st == NULL) || (st->num == 0) || (loc < 0)
-					 || (loc >= st->num)) return(NULL);
+	if(!st || (loc < 0) || (loc >= st->num)) return NULL;
 
 	ret=st->data[loc];
 	if (loc != st->num-1)
@@ -208,7 +210,7 @@ char *sk_delete(STACK *st, int loc)
 	return(ret);
 	}
 
-int sk_find(STACK *st, char *data)
+static int internal_find(STACK *st, char *data, int ret_val_options)
 	{
 	char **r;
 	int i;
@@ -231,19 +233,19 @@ int sk_find(STACK *st, char *data)
 	 * not (type *) pointers, but the *pointers* to (type *) pointers,
 	 * so we get our extra level of pointer dereferencing that way. */
 	comp_func=(int (*)(const void *,const void *))(st->comp);
-	r=(char **)bsearch(&data,(char *)st->data,
-		st->num,sizeof(char *), comp_func);
+	r=(char **)OBJ_bsearch_ex((char *)&data,(char *)st->data,
+		st->num,sizeof(char *),comp_func,ret_val_options);
 	if (r == NULL) return(-1);
-	i=(int)(r-st->data);
-	for ( ; i>0; i--)
-		/* This needs a cast because the type being pointed to from
-		 * the "&" expressions are (char *) rather than (const char *).
-		 * For an explanation, read:
-		 * http://www.eskimo.com/~scs/C-faq/q11.10.html :-) */
-		if ((*st->comp)((const char * const *)&(st->data[i-1]),
-				(const char * const *)&data) < 0)
-			break;
-	return(i);
+	return((int)(r-st->data));
+	}
+
+int sk_find(STACK *st, char *data)
+	{
+	return internal_find(st, data, OBJ_BSEARCH_FIRST_VALUE_ON_MATCH);
+	}
+int sk_find_ex(STACK *st, char *data)
+	{
+	return internal_find(st, data, OBJ_BSEARCH_VALUE_ON_NOMATCH);
 	}
 
 int sk_push(STACK *st, char *data)
@@ -304,19 +306,19 @@ int sk_num(const STACK *st)
 
 char *sk_value(const STACK *st, int i)
 {
-	if(st == NULL) return NULL;
+	if(!st || (i < 0) || (i >= st->num)) return NULL;
 	return st->data[i];
 }
 
 char *sk_set(STACK *st, int i, char *value)
 {
-	if(st == NULL) return NULL;
+	if(!st || (i < 0) || (i >= st->num)) return NULL;
 	return (st->data[i] = value);
 }
 
 void sk_sort(STACK *st)
 	{
-	if (!st->sorted)
+	if (st && !st->sorted)
 		{
 		int (*comp_func)(const void *,const void *);
 
@@ -329,4 +331,11 @@ void sk_sort(STACK *st)
 		qsort(st->data,st->num,sizeof(char *), comp_func);
 		st->sorted=1;
 		}
+	}
+
+int sk_is_sorted(const STACK *st)
+	{
+	if (!st)
+		return 1;
+	return st->sorted;
 	}

@@ -62,8 +62,17 @@
 #include <openssl/evp.h>
 #include <openssl/objects.h>
 #include <openssl/asn1.h>
+#ifndef OPENSSL_NO_RSA
+#include <openssl/rsa.h>
+#endif
+#ifndef OPENSSL_NO_DSA
+#include <openssl/dsa.h>
+#endif
+#ifndef OPENSSL_NO_EC
+#include <openssl/ec.h>
+#endif
 
-EVP_PKEY *d2i_PrivateKey(int type, EVP_PKEY **a, unsigned char **pp,
+EVP_PKEY *d2i_PrivateKey(int type, EVP_PKEY **a, const unsigned char **pp,
 	     long length)
 	{
 	EVP_PKEY *ret;
@@ -82,20 +91,32 @@ EVP_PKEY *d2i_PrivateKey(int type, EVP_PKEY **a, unsigned char **pp,
 	ret->type=EVP_PKEY_type(type);
 	switch (ret->type)
 		{
-#ifndef NO_RSA
+#ifndef OPENSSL_NO_RSA
 	case EVP_PKEY_RSA:
-		if ((ret->pkey.rsa=d2i_RSAPrivateKey(NULL,pp,length)) == NULL)
+		if ((ret->pkey.rsa=d2i_RSAPrivateKey(NULL,
+			(const unsigned char **)pp,length)) == NULL) /* TMP UGLY CAST */
 			{
 			ASN1err(ASN1_F_D2I_PRIVATEKEY,ERR_R_ASN1_LIB);
 			goto err;
 			}
 		break;
 #endif
-#ifndef NO_DSA
+#ifndef OPENSSL_NO_DSA
 	case EVP_PKEY_DSA:
-		if ((ret->pkey.dsa=d2i_DSAPrivateKey(NULL,pp,length)) == NULL)
+		if ((ret->pkey.dsa=d2i_DSAPrivateKey(NULL,
+			(const unsigned char **)pp,length)) == NULL) /* TMP UGLY CAST */
 			{
 			ASN1err(ASN1_F_D2I_PRIVATEKEY,ERR_R_ASN1_LIB);
+			goto err;
+			}
+		break;
+#endif
+#ifndef OPENSSL_NO_EC
+	case EVP_PKEY_EC:
+		if ((ret->pkey.ec = d2i_ECPrivateKey(NULL, 
+			(const unsigned char **)pp, length)) == NULL)
+			{
+			ASN1err(ASN1_F_D2I_PRIVATEKEY, ERR_R_ASN1_LIB);
 			goto err;
 			}
 		break;
@@ -114,11 +135,11 @@ err:
 
 /* This works like d2i_PrivateKey() except it automatically works out the type */
 
-EVP_PKEY *d2i_AutoPrivateKey(EVP_PKEY **a, unsigned char **pp,
+EVP_PKEY *d2i_AutoPrivateKey(EVP_PKEY **a, const unsigned char **pp,
 	     long length)
 {
 	STACK_OF(ASN1_TYPE) *inkey;
-	unsigned char *p;
+	const unsigned char *p;
 	int keytype;
 	p = *pp;
 	/* Dirty trick: read in the ASN1 data into a STACK_OF(ASN1_TYPE):
@@ -130,7 +151,10 @@ EVP_PKEY *d2i_AutoPrivateKey(EVP_PKEY **a, unsigned char **pp,
 	/* Since we only need to discern "traditional format" RSA and DSA
 	 * keys we can just count the elements.
          */
-	if(sk_ASN1_TYPE_num(inkey) == 6) keytype = EVP_PKEY_DSA;
+	if(sk_ASN1_TYPE_num(inkey) == 6) 
+		keytype = EVP_PKEY_DSA;
+	else if (sk_ASN1_TYPE_num(inkey) == 4)
+		keytype = EVP_PKEY_EC;
 	else keytype = EVP_PKEY_RSA;
 	sk_ASN1_TYPE_pop_free(inkey, ASN1_TYPE_free);
 	return d2i_PrivateKey(keytype, a, pp, length);

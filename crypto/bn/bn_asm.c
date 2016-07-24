@@ -68,7 +68,7 @@
 
 #if defined(BN_LLONG) || defined(BN_UMULT_HIGH)
 
-BN_ULONG bn_mul_add_words(BN_ULONG *rp, BN_ULONG *ap, int num, BN_ULONG w)
+BN_ULONG bn_mul_add_words(BN_ULONG *rp, const BN_ULONG *ap, int num, BN_ULONG w)
 	{
 	BN_ULONG c1=0;
 
@@ -93,7 +93,7 @@ BN_ULONG bn_mul_add_words(BN_ULONG *rp, BN_ULONG *ap, int num, BN_ULONG w)
 	return(c1);
 	} 
 
-BN_ULONG bn_mul_words(BN_ULONG *rp, BN_ULONG *ap, int num, BN_ULONG w)
+BN_ULONG bn_mul_words(BN_ULONG *rp, const BN_ULONG *ap, int num, BN_ULONG w)
 	{
 	BN_ULONG c1=0;
 
@@ -117,7 +117,7 @@ BN_ULONG bn_mul_words(BN_ULONG *rp, BN_ULONG *ap, int num, BN_ULONG w)
 	return(c1);
 	} 
 
-void bn_sqr_words(BN_ULONG *r, BN_ULONG *a, int n)
+void bn_sqr_words(BN_ULONG *r, const BN_ULONG *a, int n)
         {
 	assert(n >= 0);
 	if (n <= 0) return;
@@ -139,7 +139,7 @@ void bn_sqr_words(BN_ULONG *r, BN_ULONG *a, int n)
 
 #else /* !(defined(BN_LLONG) || defined(BN_UMULT_HIGH)) */
 
-BN_ULONG bn_mul_add_words(BN_ULONG *rp, BN_ULONG *ap, int num, BN_ULONG w)
+BN_ULONG bn_mul_add_words(BN_ULONG *rp, const BN_ULONG *ap, int num, BN_ULONG w)
 	{
 	BN_ULONG c=0;
 	BN_ULONG bl,bh;
@@ -166,7 +166,7 @@ BN_ULONG bn_mul_add_words(BN_ULONG *rp, BN_ULONG *ap, int num, BN_ULONG w)
 	return(c);
 	} 
 
-BN_ULONG bn_mul_words(BN_ULONG *rp, BN_ULONG *ap, int num, BN_ULONG w)
+BN_ULONG bn_mul_words(BN_ULONG *rp, const BN_ULONG *ap, int num, BN_ULONG w)
 	{
 	BN_ULONG carry=0;
 	BN_ULONG bl,bh;
@@ -193,7 +193,7 @@ BN_ULONG bn_mul_words(BN_ULONG *rp, BN_ULONG *ap, int num, BN_ULONG w)
 	return(carry);
 	} 
 
-void bn_sqr_words(BN_ULONG *r, BN_ULONG *a, int n)
+void bn_sqr_words(BN_ULONG *r, const BN_ULONG *a, int n)
         {
 	assert(n >= 0);
 	if (n <= 0) return;
@@ -237,7 +237,7 @@ BN_ULONG bn_div_words(BN_ULONG h, BN_ULONG l, BN_ULONG d)
 	if (d == 0) return(BN_MASK2);
 
 	i=BN_num_bits_word(d);
-	assert((i == BN_BITS2) || (h > (BN_ULONG)1<<i));
+	assert((i == BN_BITS2) || (h <= (BN_ULONG)1<<i));
 
 	i=BN_BITS2-i;
 	if (h >= d) h-=d;
@@ -296,7 +296,7 @@ BN_ULONG bn_div_words(BN_ULONG h, BN_ULONG l, BN_ULONG d)
 #endif /* !defined(BN_LLONG) && defined(BN_DIV2W) */
 
 #ifdef BN_LLONG
-BN_ULONG bn_add_words(BN_ULONG *r, BN_ULONG *a, BN_ULONG *b, int n)
+BN_ULONG bn_add_words(BN_ULONG *r, const BN_ULONG *a, const BN_ULONG *b, int n)
         {
 	BN_ULLONG ll=0;
 
@@ -332,7 +332,7 @@ BN_ULONG bn_add_words(BN_ULONG *r, BN_ULONG *a, BN_ULONG *b, int n)
 	return((BN_ULONG)ll);
 	}
 #else /* !BN_LLONG */
-BN_ULONG bn_add_words(BN_ULONG *r, BN_ULONG *a, BN_ULONG *b, int n)
+BN_ULONG bn_add_words(BN_ULONG *r, const BN_ULONG *a, const BN_ULONG *b, int n)
         {
 	BN_ULONG c,l,t;
 
@@ -382,7 +382,7 @@ BN_ULONG bn_add_words(BN_ULONG *r, BN_ULONG *a, BN_ULONG *b, int n)
 	}
 #endif /* !BN_LLONG */
 
-BN_ULONG bn_sub_words(BN_ULONG *r, BN_ULONG *a, BN_ULONG *b, int n)
+BN_ULONG bn_sub_words(BN_ULONG *r, const BN_ULONG *a, const BN_ULONG *b, int n)
         {
 	BN_ULONG t1,t2;
 	int c=0;
@@ -457,6 +457,34 @@ BN_ULONG bn_sub_words(BN_ULONG *r, BN_ULONG *a, BN_ULONG *b, int n)
 	c1=(c1+t2)&BN_MASK2; if ((c1) < t2) c2++;
 
 #define sqr_add_c2(a,i,j,c0,c1,c2) \
+	mul_add_c2((a)[i],(a)[j],c0,c1,c2)
+
+#elif defined(BN_UMULT_LOHI)
+
+#define mul_add_c(a,b,c0,c1,c2)	{	\
+	BN_ULONG ta=(a),tb=(b);		\
+	BN_UMULT_LOHI(t1,t2,ta,tb);	\
+	c0 += t1; t2 += (c0<t1)?1:0;	\
+	c1 += t2; c2 += (c1<t2)?1:0;	\
+	}
+
+#define mul_add_c2(a,b,c0,c1,c2) {	\
+	BN_ULONG ta=(a),tb=(b),t0;	\
+	BN_UMULT_LOHI(t0,t1,ta,tb);	\
+	t2 = t1+t1; c2 += (t2<t1)?1:0;	\
+	t1 = t0+t0; t2 += (t1<t0)?1:0;	\
+	c0 += t1; t2 += (c0<t1)?1:0;	\
+	c1 += t2; c2 += (c1<t2)?1:0;	\
+	}
+
+#define sqr_add_c(a,i,c0,c1,c2)	{	\
+	BN_ULONG ta=(a)[i];		\
+	BN_UMULT_LOHI(t1,t2,ta,ta);	\
+	c0 += t1; t2 += (c0<t1)?1:0;	\
+	c1 += t2; c2 += (c1<t2)?1:0;	\
+	}
+
+#define sqr_add_c2(a,i,j,c0,c1,c2)	\
 	mul_add_c2((a)[i],(a)[j],c0,c1,c2)
 
 #elif defined(BN_UMULT_HIGH)
@@ -673,7 +701,7 @@ void bn_mul_comba4(BN_ULONG *r, BN_ULONG *a, BN_ULONG *b)
 	r[7]=c2;
 	}
 
-void bn_sqr_comba8(BN_ULONG *r, BN_ULONG *a)
+void bn_sqr_comba8(BN_ULONG *r, const BN_ULONG *a)
 	{
 #ifdef BN_LLONG
 	BN_ULLONG t,tt;
@@ -754,7 +782,7 @@ void bn_sqr_comba8(BN_ULONG *r, BN_ULONG *a)
 	r[15]=c1;
 	}
 
-void bn_sqr_comba4(BN_ULONG *r, BN_ULONG *a)
+void bn_sqr_comba4(BN_ULONG *r, const BN_ULONG *a)
 	{
 #ifdef BN_LLONG
 	BN_ULLONG t,tt;
